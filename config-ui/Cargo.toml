@@ -1,0 +1,23 @@
+[package]
+name = "orca-term-config-ui"
+version = "0.1.0"
+edition = "2024"
+
+# 独立 workspace：与主程序隔离构建——freetype links 冲突使 gpui 与 wezterm-font
+# 无法共存于同一依赖图（ADR 0001）。经 path 依赖复用 config-ui-core。
+[workspace]
+
+[dependencies]
+gpui = { path = "../Ref-src/zed-1.16.1/crates/gpui" }
+gpui_platform = { path = "../Ref-src/zed-1.16.1/crates/gpui_platform" }
+config-ui-core = { path = "../config-ui-core" }
+serde_json = "1.0"
+unicode-segmentation = "1.12"
+notify = "5.0"
+smol = "2"
+image = "0.25"
+fontdb = "0.24"
+
+[target."cfg(windows)".dependencies]
+winapi = { version = "0.3", features = ["wingdi", "winuser", "commdlg"] }
+raw-window-handle = "0.6"

@@ -1,0 +1,5 @@
+# graphify-rs 扫描忽略清单：排除构建产物与工具目录，缩短重建时间、避免自引用
+target/
+.git/
+Temp/graphify-rs-out/
+Temp/pty-exit-probe/

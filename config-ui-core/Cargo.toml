@@ -1,0 +1,13 @@
+[package]
+name = "config-ui-core"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[dependencies]
+anyhow.workspace = true
+config.workspace = true
+mlua = { workspace = true, features = ["vendored", "lua54", "async", "send", "serialize"] }
+serde_json.workspace = true
+smol.workspace = true
+wezterm-dynamic.workspace = true
