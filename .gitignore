@@ -1,4 +1,5 @@
-/portable
+/portable/
+/Issue/
 /.tag
 .DS_Store
 dhat-heap.json
