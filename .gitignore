@@ -73,12 +73,12 @@ dhat-heap.json
 /Ref-src/
 /Temp/
 /Issue/
-/tetris.html
 /Temp/*.log
 /Temp/graphify-rs-out/
 /config-ui/target/
 /.superpowers/
 /.graphify_rs.toml
+/dist/
 
 # 构建号流水（build.ps1 每次构建写入，本地产物）
 /build-id.txt

@@ -6,7 +6,7 @@ A portable, Windows-first terminal emulator forked from [wezterm](https://github
 
 ## What is different from upstream wezterm
 
-- **Portable distribution** — `build.ps1` produces a self-contained `portable/` directory (exe + `conpty.dll`/`OpenConsole.exe` side-load + fonts + icons). No installer, no registry writes; the app reads its `orca-config.lua` from its own directory instead of `$HOME`.
+- **Portable distribution** — `build.ps1` produces a self-contained `dist/` directory (exe + `conpty.dll`/`OpenConsole.exe` side-load + fonts + icons). No installer, no registry writes; the app reads its `orca-config.lua` from its own directory instead of `$HOME`.
 - **Built-in configuration UI** (`orca-term-config-ui.exe`, started from the gear button in the tab bar) — written in Rust on top of Zed's **GPUI** framework:
   - SSH connection manager (host / port / username / private key, validated and emitted to `orca-config.lua` as `ssh_domains`, integrated with the launch menu)
   - Per-connection "run command after connect" (e.g. `cd /data/project`), implemented via the upstream `SshDomain.default_prog` mechanism
@@ -25,7 +25,7 @@ Requirements: Rust (MSVC toolchain), Visual Studio 2022 Build Tools, Strawberry 
 ./build.ps1 -Profile release
 ```
 
-Output goes to `portable/`: `orca-term-gui.exe`, `orca-term.exe` (CLI), `orca-term-config-ui.exe`.
+Output goes to `dist/`: `orca-term-gui.exe`, `orca-term.exe` (CLI), `orca-term-config-ui.exe`.
 
 ## Acknowledgements
 

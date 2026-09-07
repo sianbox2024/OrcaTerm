@@ -6,7 +6,7 @@
 
 ## 与上游 wezterm 的差异
 
-- **便携化分发** — `build.ps1` 产出自包含的 `portable/` 目录（exe + 侧载的 `conpty.dll`/`OpenConsole.exe` + 字体 + 图标）。无安装器、不写注册表；程序从自身目录读取 `orca-config.lua`，而非 `$HOME`。
+- **便携化分发** — `build.ps1` 产出自包含的 `dist/` 目录（exe + 侧载的 `conpty.dll`/`OpenConsole.exe` + 字体 + 图标）。无安装器、不写注册表；程序从自身目录读取 `orca-config.lua`，而非 `$HOME`。
 - **内置配置界面**（`orca-term-config-ui.exe`，从标签栏齿轮按钮启动）— 基于 Zed 的 **GPUI** 框架以 Rust 编写：
   - SSH 连接管理器（主机 / 端口 / 用户名 / 私钥，校验后以 `ssh_domains` 形式写入 `orca-config.lua`，并与启动菜单集成）
   - 每连接「连接后执行命令」（如 `cd /data/project`），基于上游 `SshDomain.default_prog` 机制实现
@@ -25,7 +25,7 @@
 ./build.ps1 -Profile release
 ```
 
-产物输出到 `portable/`：`orca-term-gui.exe`、`orca-term.exe`（CLI）、`orca-term-config-ui.exe`。
+产物输出到 `dist/`：`orca-term-gui.exe`、`orca-term.exe`（CLI）、`orca-term-config-ui.exe`。
 
 ## 致谢
 
