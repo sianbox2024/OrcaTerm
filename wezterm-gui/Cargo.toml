@@ -121,6 +121,7 @@ winapi = { workspace=true, features = [
     "handleapi",
     "fileapi",
     "namedpipeapi",
+    "shellapi",
     "synchapi",
     "winsock2",
 ]}

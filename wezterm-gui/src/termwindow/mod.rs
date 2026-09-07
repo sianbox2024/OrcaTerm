@@ -302,6 +302,17 @@ impl UserData for PaneInformation {
                 None => Ok("".to_string()),
             }
         });
+        fields.add_field_method_get("is_elevated", |_, this| {
+            let mut elevated = None;
+            if let Some(mux) = Mux::try_get() {
+                if let Some(pane) = mux.get_pane(this.pane_id) {
+                    elevated = pane.is_elevated(CachePolicy::AllowStale);
+                }
+            }
+            // Lua 侧拿不到区分 None 与 false 的便捷手段，统一映射为 false 之外的
+            // 三态：true=确认提权，false=确认未提权，nil=未知/平台不支持
+            Ok(elevated)
+        });
         fields.add_field_method_get("tty_name", |_, this| {
             let mut name = None;
             if let Some(mux) = Mux::try_get() {

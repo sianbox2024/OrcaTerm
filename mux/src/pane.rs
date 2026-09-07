@@ -338,6 +338,12 @@ pub trait Pane: Downcast + Send + Sync {
         None
     }
 
+    /// 当前前台进程是否以管理员（提权）令牌运行；None = 未知/平台不支持。
+    /// 用于 tab 标题的「(管理员)」标记。
+    fn is_elevated(&self, _policy: CachePolicy) -> Option<bool> {
+        None
+    }
+
     fn tty_name(&self) -> Option<String> {
         None
     }

@@ -152,12 +152,17 @@ pub fn emit_ssh_domains(conns: &[SshConnection]) -> String {
     out
 }
 
-/// 发射 `config.launch_menu`：固定两项本地 shell（CMD / PowerShell），
-/// 再为每个 SSH 连接生成「新SSH（名称）窗口」。保存时无条件重写，保证菜单与连接列表同步。
+/// 发射 `config.launch_menu`：四项本地 shell（CMD / PowerShell / 管理员CMD / 管理员PowerShell，
+/// 后两项用 elevate=true 由提权的新 GUI 实例运行，UAC 授权后生效），再为每个 SSH 连接
+/// 生成对应条目。保存时无条件重写，保证菜单与连接列表同步。
 pub fn emit_launch_menu(conns: &[SshConnection]) -> String {
     let mut out = String::from("config.launch_menu = {\n");
     out.push_str("  { label='新CMD窗口', args={'cmd.exe'} },\n");
     out.push_str("  { label='新PowerShell窗口', args={'powershell.exe'} },\n");
+    out.push_str("  { label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true },\n");
+    out.push_str(
+        "  { label='新管理员PowerShell窗口', args={'powershell.exe'}, elevate=true },\n",
+    );
     for c in conns {
         let name = c.name.trim();
         if name.is_empty() {
@@ -165,11 +170,28 @@ pub fn emit_launch_menu(conns: &[SshConnection]) -> String {
         }
         out.push_str(&format!(
             "  {{ label={}, domain={{ DomainName={} }} }},\n",
-            quote(&format!("新SSH（{name}）窗口")),
+            quote(name),
             quote(name)
         ));
     }
     out.push_str("}\n");
+    // tab 标题「(管理员)」标记：前台进程提权时加前缀（PaneInformation.is_elevated，
+    // 由 procinfo::LocalProcessInfo::is_elevated 提供，仅 Windows）
+    out.push_str(
+        "wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max_width)\n\
+         \x20 local title = tab.tab_title\n\
+         \x20 if #title == 0 then\n\
+         \x20   title = tab.active_pane.title\n\
+         \x20 end\n\
+         \x20 local pane = tab.active_pane\n\
+         \x20 if pane and pane.is_elevated then\n\
+         \x20   title = '(管理员)' .. title\n\
+         \x20 end\n\
+         \x20 return {\n\
+         \x20   { Text = title },\n\
+         \x20 }\n\
+         end)\n",
+    );
     out
 }
 
@@ -299,7 +321,7 @@ mod tests {
     }
 
     #[test]
-    fn launch_menu_lists_shells_and_ssh_entries() {
+    fn launch_menu_lists_shells_admin_and_ssh_entries() {
         let conns = vec![SshConnection {
             name: "MSI".into(),
             host: "192.168.1.100".into(),
@@ -311,10 +333,24 @@ mod tests {
         let lua = emit_launch_menu(&conns);
         assert!(lua.contains("label='新CMD窗口'"), "{lua}");
         assert!(lua.contains("label='新PowerShell窗口'"), "{lua}");
-        assert!(lua.contains("label='新SSH（MSI）窗口'"), "{lua}");
+        // 管理员项走 elevate=true（原生 UAC 提权新实例），不再借 sudo
+        assert!(lua.contains("label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true"), "{lua}");
+        assert!(
+            lua.contains("label='新管理员PowerShell窗口', args={'powershell.exe'}, elevate=true"),
+            "{lua}"
+        );
+        assert!(!lua.contains("'sudo'"), "不应再依赖 sudo：{lua}");
+        // SSH 条目直接以连接名作为菜单标签，按配置顺序排在四个 shell 之后
+        let cmd_pos = lua.find("label='新CMD窗口'").unwrap();
+        let admin_pos = lua.find("label='新管理员CMD窗口'").unwrap();
+        let ssh_pos = lua.find("label='MSI'").unwrap();
+        assert!(cmd_pos < admin_pos && admin_pos < ssh_pos, "{lua}");
         assert!(lua.contains("domain={ DomainName='MSI' }"), "{lua}");
         let empty = emit_launch_menu(&[]);
-        assert!(empty.contains("新CMD窗口") && !empty.contains("新SSH"), "{empty}");
+        assert!(
+            empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell窗口") && !empty.contains("DomainName"),
+            "{empty}"
+        );
     }
 
     #[test]

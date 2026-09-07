@@ -97,6 +97,15 @@ struct ProcParams {
     console: HANDLE,
 }
 
+/// RAII 包装，确保句柄在作用域结束时关闭
+struct ScopedHandle(HANDLE);
+
+impl Drop for ScopedHandle {
+    fn drop(&mut self) {
+        unsafe { CloseHandle(self.0) };
+    }
+}
+
 /// A handle to an opened process
 struct ProcHandle {
     pid: u32,
@@ -354,6 +363,47 @@ impl LocalProcessInfo {
         log::trace!("executable_path({})", pid);
         let proc = ProcHandle::new(pid)?;
         proc.executable()
+    }
+
+    /// 检查指定进程是否以管理员（提权）令牌运行。
+    /// 注意：不能复用 ProcHandle（其 PROCESS_VM_READ 权限打开提权进程会
+    /// 被 UAC 拒绝），这里独立用 PROCESS_QUERY_LIMITED_INFORMATION 打开
+    /// ——它对高完整性进程也允许，再用进程令牌查 TokenElevation。
+    pub fn is_elevated(pid: u32) -> Option<bool> {
+        use winapi::um::processthreadsapi::{OpenProcess as OpenProcessLimited, OpenProcessToken};
+        use winapi::um::securitybaseapi::GetTokenInformation;
+        use winapi::um::winnt::{
+            TokenElevation, TOKEN_ELEVATION, TOKEN_QUERY, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+
+        let proc = unsafe { OpenProcessLimited(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid) };
+        if proc.is_null() {
+            log::trace!("is_elevated({}): OpenProcess(LIMITED) failed", pid);
+            return None;
+        }
+        let proc = ScopedHandle(proc);
+        let mut token: HANDLE = std::ptr::null_mut();
+        if unsafe { OpenProcessToken(proc.0, TOKEN_QUERY, &mut token) } == 0 {
+            log::trace!("is_elevated({}): OpenProcessToken failed", pid);
+            return None;
+        }
+        let token = ScopedHandle(token);
+        let mut elevation = TOKEN_ELEVATION { TokenIsElevated: 0 };
+        let mut ret_len = 0;
+        let res = unsafe {
+            GetTokenInformation(
+                token.0,
+                TokenElevation,
+                &mut elevation as *mut _ as *mut _,
+                std::mem::size_of::<TOKEN_ELEVATION>() as _,
+                &mut ret_len,
+            )
+        };
+        if res == 0 {
+            log::trace!("is_elevated({}): GetTokenInformation failed", pid);
+            return None;
+        }
+        Some(elevation.TokenIsElevated != 0)
     }
 
     pub fn with_root_pid(pid: u32) -> Option<Self> {

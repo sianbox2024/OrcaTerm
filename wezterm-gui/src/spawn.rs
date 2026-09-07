@@ -43,6 +43,21 @@ pub async fn spawn_command_internal(
     src_window_id: Option<MuxWindowId>,
     term_config: Arc<TermConfig>,
 ) -> anyhow::Result<()> {
+    // 提权请求：转交一个新启动的管理员 GUI 实例处理。
+    // ConPTY 句柄无法跨完整性级别复用，tab 内"原地提权"在架构上不可行；
+    // 提权实例自己创建的 ConPTY+shell 天然继承管理员令牌，
+    // 其所有 tab 都会被 is_elevated 检测命中并显示「(管理员)」标题前缀。
+    if spawn.elevate {
+        if cfg!(windows) {
+            if spawn.domain != config::SpawnTabDomain::CurrentPaneDomain {
+                anyhow::bail!("elevate 不支持与非本机域组合使用");
+            }
+            spawn_elevated_instance(&spawn)?;
+            return Ok(());
+        }
+        log::warn!("elevate 仅在 Windows 上生效，已忽略");
+    }
+
     let mux = Mux::get();
     let activity = Activity::new();
 
@@ -151,5 +166,68 @@ pub async fn spawn_command_internal(
 
     drop(activity);
 
+    Ok(())
+}
+
+/// 以管理员身份启动一个新的 OrcaTerm GUI 实例来处理提权 spawn 请求。
+/// 用 `ShellExecuteW` 的 runas 动词触发 UAC；用户确认后新实例以管理员
+/// 令牌运行，其 spawn 的 shell 天然提权。使用 --always-new-process 避免
+/// 新实例把请求回投给本（未提权）实例。
+#[cfg(windows)]
+fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::ShellExecuteW;
+    use winapi::um::winuser::SW_SHOWNORMAL;
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    // 提权走 orca-term.exe 的 start 子命令（它会再拉起 GUI）；
+    // --always-new-process 保证不回连本实例，--new-tab 不适用（跨实例）。
+    let cli = match std::env::current_exe() {
+        Ok(exe) => exe.with_file_name("orca-term.exe"),
+        Err(err) => anyhow::bail!("无法定位当前 exe：{err}"),
+    };
+
+    let mut params = String::from("--always-new-process start");
+    if let Some(args) = &spawn.args {
+        if !args.is_empty() {
+            // 参数中可能含空格，统一加引号（Windows 命令行引号规则）
+            let quoted: Vec<String> = args
+                .iter()
+                .map(|a| format!("\"{}\"", a.replace('"', "\\\"")))
+                .collect();
+            params.push_str(" -- ");
+            params.push_str(&quoted.join(" "));
+        }
+    }
+
+    let verb = wide("runas");
+    let file = wide(cli.to_string_lossy().as_ref());
+    let parameters = wide(&params);
+
+    // ShellExecuteW 需要在有消息循环的线程外调用也没问题，但 UAC 提权
+    // 要求调用进程具有可交互的窗口站；GUI 线程满足条件。
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file.as_ptr(),
+            parameters.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    // 返回值 <=32 表示失败（含 SE_ERR_ACCESSDENIED=5：用户取消 UAC）
+    if result as i32 <= 32 {
+        let code = result as i32;
+        if code == 5 {
+            log::info!("用户取消了管理员授权");
+        } else {
+            log::error!("ShellExecuteW runas 失败，错误码 {code}");
+        }
+    }
     Ok(())
 }

@@ -96,4 +96,10 @@ impl LocalProcessInfo {
     pub fn executable_path(_pid: u32) -> Option<PathBuf> {
         None
     }
+
+    /// 非 Windows 平台无管理员提权概念，恒为 None
+    #[cfg(not(windows))]
+    pub fn is_elevated(_pid: u32) -> Option<bool> {
+        None
+    }
 }

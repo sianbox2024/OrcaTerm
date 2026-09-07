@@ -184,8 +184,8 @@ pub struct SpawnCommand {
     pub args: Option<Vec<String>>,
 
     /// Specifies the current working directory for the command.
-    /// If omitted, a default will be used; typically that will
-    /// be the home directory of the user, but may also be the
+    /// If omitted, a default will be used; typically that will be
+    /// the home directory of the user, but may also be the
     /// current working directory of the wezterm process when
     /// it was launched, or for some domains it may be some
     /// other location appropriate to the domain.
@@ -200,6 +200,13 @@ pub struct SpawnCommand {
     pub domain: SpawnTabDomain,
 
     pub position: Option<crate::GuiPosition>,
+
+    /// 仅 Windows：以管理员（提权）方式启动一个新的 OrcaTerm GUI 实例，
+    /// 并在其中运行 args 指定的程序。其余平台忽略此标志。
+    /// ConPTY 无法跨完整性级别复用句柄（微软 sudo 的 inline 模式同样
+    /// 受此限制），因此提权会话必须由提权进程自己创建。
+    #[dynamic(default)]
+    pub elevate: bool,
 }
 impl_lua_conversion_dynamic!(SpawnCommand);
 
@@ -264,6 +271,7 @@ impl SpawnCommand {
             set_environment_variables,
             cwd,
             position: None,
+            elevate: false,
         })
     }
 }

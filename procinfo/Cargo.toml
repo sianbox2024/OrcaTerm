@@ -22,6 +22,7 @@ winapi = { workspace=true, features = [
     "memoryapi",
     "psapi",
     "processthreadsapi",
+    "securitybaseapi",
     "shellapi",
     "tlhelp32",
 ]}

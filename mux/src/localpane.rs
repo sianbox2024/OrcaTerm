@@ -558,6 +558,21 @@ impl Pane for LocalPane {
         None
     }
 
+    fn is_elevated(&self, policy: CachePolicy) -> Option<bool> {
+        #[cfg(windows)]
+        {
+            let fg = self.divine_foreground_process(policy)?;
+            // 提权检测走的是快照缓存里的 pid；divine 返回的信息带有 pid 字段
+            procinfo::LocalProcessInfo::is_elevated(fg.pid)
+        }
+
+        #[cfg(not(windows))]
+        {
+            let _ = policy;
+            None
+        }
+    }
+
     fn can_close_without_prompting(&self, _reason: CloseReason) -> bool {
         if let Some(info) = self.divine_process_list(CachePolicy::FetchImmediate) {
             log::trace!(
