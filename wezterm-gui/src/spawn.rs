@@ -49,7 +49,7 @@ pub async fn spawn_command_internal(
     // 其所有 tab 都会被 is_elevated 检测命中并显示「(管理员)」标题前缀。
     if spawn.elevate {
         if cfg!(windows) {
-            if spawn.domain != config::SpawnTabDomain::CurrentPaneDomain {
+            if spawn.domain != config::keyassignment::SpawnTabDomain::CurrentPaneDomain {
                 anyhow::bail!("elevate 不支持与非本机域组合使用");
             }
             spawn_elevated_instance(&spawn)?;
@@ -185,13 +185,13 @@ fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
     }
 
     // 提权走 orca-term.exe 的 start 子命令（它会再拉起 GUI）；
-    // --always-new-process 保证不回连本实例，--new-tab 不适用（跨实例）。
+    // --always-new-process 保证不回连本实例（它是 start 的选项，须置于 start 之后）。
     let cli = match std::env::current_exe() {
         Ok(exe) => exe.with_file_name("orca-term.exe"),
         Err(err) => anyhow::bail!("无法定位当前 exe：{err}"),
     };
 
-    let mut params = String::from("--always-new-process start");
+    let mut params = String::from("start --always-new-process");
     if let Some(args) = &spawn.args {
         if !args.is_empty() {
             // 参数中可能含空格，统一加引号（Windows 命令行引号规则）
@@ -224,7 +224,7 @@ fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
     if result as i32 <= 32 {
         let code = result as i32;
         if code == 5 {
-            log::info!("用户取消了管理员授权");
+            log::warn!("用户取消了管理员授权（UAC）");
         } else {
             log::error!("ShellExecuteW runas 失败，错误码 {code}");
         }

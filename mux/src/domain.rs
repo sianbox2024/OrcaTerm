@@ -334,6 +334,7 @@ impl LocalDomain {
                 set_environment_variables,
                 cwd,
                 position: None,
+                elevate: false,
             };
 
             let spawn_command = config::with_lua_config_on_main_thread(|lua| async {
