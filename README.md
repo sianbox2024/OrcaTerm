@@ -13,6 +13,9 @@ A portable, Windows-first terminal emulator forked from [wezterm](https://github
   - Font, color scheme, padding and other common settings in a native GUI
 - **Build-number versioning** — the tab bar shows a per-build identifier (`Ver 1.0 build<date.seq>`) for tracing binaries back to commits.
 - **ConPTY side-loading** — ships a pinned `conpty.dll` + `OpenConsole.exe` so console behavior does not depend on the OS build (fixes garbled CJK output / stray cmd.exe on Chinese Windows).
+- **Elevated (Administrator) terminal sessions** — the launch menu (right-click the `+` button) offers "elevated CMD / PowerShell" entries. Selecting one triggers the Windows UAC prompt and opens a **new OrcaTerm window running with an administrator token**; every tab inside it is elevated and its title gets a `(管理员)` prefix (based on real token detection via `TokenElevation`, not on the shell name).
+  - No manual prerequisites: this uses the native Windows `runas` elevation. It does **not** use or require `sudo.exe` (Microsoft sudo's inline mode cannot attach to a ConPTY, so the elevated shell must be spawned by an elevated OrcaTerm instance of its own).
+  - Why a new window: ConPTY handles cannot cross UAC integrity levels, so an elevated shell must live in a process tree that is elevated from the start — the same constraint that makes Windows Terminal open admin terminals in a separate window.
 
 Everything else — the terminal core, multiplexer, PTY layer, Lua configuration — is upstream wezterm.
 

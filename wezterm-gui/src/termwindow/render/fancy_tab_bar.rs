@@ -51,6 +51,85 @@ const PLUS_BUTTON: &[Poly] = &[
     },
 ];
 
+/// 设置按钮齿轮图标：外圈 + 轴心 + 六根辐条。矢量绘制不依赖字体回退链
+/// （此前用 U+2699 字形，用户终端字体含该字形时会被 nerd 字体的窄小设计替换，
+/// 且 emoji 回退字形会被压缩缩放，表现为换字体后图标突然变小）。
+const GEAR_BUTTON: &[Poly] = &[
+    // 外圈
+    Poly {
+        path: &[PolyCommand::Circle {
+            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            radius: BlockCoord::Frac(9, 20),
+        }],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    // 轴心
+    Poly {
+        path: &[PolyCommand::Circle {
+            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            radius: BlockCoord::Frac(1, 5),
+        }],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    // 六根辐条（齿轮齿），每 60° 一根，从轴心延伸到外圈
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::Frac(1, 2), BlockCoord::Zero),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(1, 6)),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(5, 6)),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::Frac(1, 2), BlockCoord::One),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Frac(5, 6)),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+    Poly {
+        path: &[
+            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
+            PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Frac(1, 6)),
+            PolyCommand::Close,
+        ],
+        intensity: BlockAlpha::Full,
+        style: PolyStyle::Outline,
+    },
+];
+
 impl crate::TermWindow {
     pub fn invalidate_fancy_tab_bar(&mut self) {
         self.fancy_tab_bar.take();
@@ -297,9 +376,18 @@ impl crate::TermWindow {
                 TabBarItem::ConfigUIButton => {
                     let new_tab = colors.new_tab();
                     let new_tab_hover = colors.new_tab_hover();
+                    // 矢量齿轮（GEAR_BUTTON），尺寸公式与"+"按钮一致：
+                    // 标题字体 cell 高的一半，换终端字体不影响图标大小
                     Element::new(
                         &font,
-                        ElementContent::Text("⚙".to_string()),
+                        ElementContent::Poly {
+                            line_width: metrics.underline_height.max(2),
+                            poly: SizedPoly {
+                                poly: GEAR_BUTTON,
+                                width: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
+                                height: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
+                            },
+                        },
                     )
                     .vertical_align(VerticalAlign::Middle)
                     .item_type(UIItemType::TabBar(item.item.clone()))

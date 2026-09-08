@@ -4,6 +4,47 @@
 
 use serde_json::Value;
 
+/// PowerShell 探测结果：pwsh 7 可用时所有「PowerShell」语义的发射项都指向它。
+enum Shell {
+    Pwsh,
+    Fallback,
+}
+
+/// 探测本机 PowerShell：pwsh 7（PATH 或 %ProgramFiles%/PowerShell/7）优先，无则回退
+/// powershell.exe（PS 5.1）。与主程序 config::default_default_prog / windows_has_pwsh
+/// 策略一致；GUI 保存重写整个配置文件，菜单项必须与主程序默认 shell 的选择逻辑同步，
+/// 否则一次保存就会把默认 shell 降级为 PS 5.1。
+fn default_shell() -> Shell {
+    #[cfg(windows)]
+    {
+        let has_pwsh = || {
+            std::env::var_os("PATH")
+                .map(|paths| {
+                    std::env::split_paths(&paths).any(|dir| dir.join("pwsh.exe").is_file())
+                })
+                .unwrap_or(false)
+                || std::env::var_os("ProgramFiles")
+                    .map(|pf| {
+                        std::path::PathBuf::from(pf)
+                            .join("PowerShell")
+                            .join("7")
+                            .join("pwsh.exe")
+                            .is_file()
+                    })
+                    .unwrap_or(false)
+        };
+        if has_pwsh() {
+            Shell::Pwsh
+        } else {
+            Shell::Fallback
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        Shell::Fallback
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct SshConnection {
     pub name: String,
@@ -156,13 +197,32 @@ pub fn emit_ssh_domains(conns: &[SshConnection]) -> String {
 /// 后两项用 elevate=true 由提权的新 GUI 实例运行，UAC 授权后生效），再为每个 SSH 连接
 /// 生成对应条目。保存时无条件重写，保证菜单与连接列表同步。
 pub fn emit_launch_menu(conns: &[SshConnection]) -> String {
+    // PowerShell 菜单项与默认 shell 保持一致：探测到 pwsh 7 时用 pwsh（含 -NoLogo），
+    // 否则回退 powershell.exe（PS 5.1）。与主程序 config::default_default_prog 的
+    // 策略相同；此前硬编码 powershell.exe，会把保存动作变成「默认 shell 降级为 PS 5.1」。
+    let (ps_label, ps_args, ps_admin_label) = match default_shell() {
+        Shell::Pwsh => (
+            "新PowerShell 7窗口",
+            "{'pwsh.exe', '-NoLogo'}",
+            "新管理员PowerShell 7窗口",
+        ),
+        Shell::Fallback => (
+            "新PowerShell窗口",
+            "{'powershell.exe'}",
+            "新管理员PowerShell窗口",
+        ),
+    };
     let mut out = String::from("config.launch_menu = {\n");
     out.push_str("  { label='新CMD窗口', args={'cmd.exe'} },\n");
-    out.push_str("  { label='新PowerShell窗口', args={'powershell.exe'} },\n");
+    out.push_str(&format!(
+        "  {{ label='{}', args={} }},\n",
+        ps_label, ps_args
+    ));
     out.push_str("  { label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true },\n");
-    out.push_str(
-        "  { label='新管理员PowerShell窗口', args={'powershell.exe'}, elevate=true },\n",
-    );
+    out.push_str(&format!(
+        "  {{ label='{}', args={}, elevate=true }},\n",
+        ps_admin_label, ps_args
+    ));
     for c in conns {
         let name = c.name.trim();
         if name.is_empty() {
@@ -332,12 +392,22 @@ mod tests {
         }];
         let lua = emit_launch_menu(&conns);
         assert!(lua.contains("label='新CMD窗口'"), "{lua}");
-        assert!(lua.contains("label='新PowerShell窗口'"), "{lua}");
-        // 管理员项走 elevate=true（原生 UAC 提权新实例），不再借 sudo
-        assert!(lua.contains("label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true"), "{lua}");
+        // PowerShell 项跟随本机探测（pwsh 7 / PS 5.1），但普通项与管理员项必须同源：
+        // 找到普通项后按同一 args 断言管理员项，防止再次出现「普通项 pwsh、管理员项 5.1」的漂移。
+        let ps_args = if lua.contains("args={'pwsh.exe', '-NoLogo'}") {
+            "{'pwsh.exe', '-NoLogo'}"
+        } else {
+            "{'powershell.exe'}"
+        };
         assert!(
-            lua.contains("label='新管理员PowerShell窗口', args={'powershell.exe'}, elevate=true"),
+            lua.contains(&format!(
+                "label='新管理员CMD窗口', args={{'cmd.exe'}}, elevate=true"
+            )),
             "{lua}"
+        );
+        assert!(
+            lua.contains(&format!("args={ps_args}, elevate=true")),
+            "管理员 PowerShell 项应与普通项使用同一 shell：{lua}"
         );
         assert!(!lua.contains("'sudo'"), "不应再依赖 sudo：{lua}");
         // SSH 条目直接以连接名作为菜单标签，按配置顺序排在四个 shell 之后
@@ -348,7 +418,7 @@ mod tests {
         assert!(lua.contains("domain={ DomainName='MSI' }"), "{lua}");
         let empty = emit_launch_menu(&[]);
         assert!(
-            empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell窗口") && !empty.contains("DomainName"),
+            empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell") && !empty.contains("DomainName"),
             "{empty}"
         );
     }

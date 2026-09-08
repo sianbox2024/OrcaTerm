@@ -346,9 +346,11 @@ impl ConfigUi {
             self.padding_right_input = Some(cx.new(|cx| TextInput::new("8", cx)));
             self.padding_top_input = Some(cx.new(|cx| TextInput::new("4", cx)));
             self.padding_bottom_input = Some(cx.new(|cx| TextInput::new("4", cx)));
-            self.default_prog_input = Some(cx.new(|cx| TextInput::new("powershell.exe", cx)));
-            // 初始化 form.default_prog，否则用户不改直接保存时会丢失初始值
-            self.form.default_prog = Some(vec!["powershell.exe".to_string()]);
+            // 首次创建占位符仅为输入提示；form.default_prog 已由 reload_from_disk
+            // 从磁盘配置或出厂默认加载，此处若硬编码覆写会把 pwsh 7 等用户设置
+            // 冲成 PS 5.1，导致「只改字体保存一次」就丢默认 shell。实际内容
+            // 由本函数末尾的统一回填（set_input）写入。
+            self.default_prog_input = Some(cx.new(|cx| TextInput::new("如 pwsh.exe 或完整路径", cx)));
             self.ssh_name_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_host_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_port_input = Some(cx.new(|cx| TextInput::new("22", cx)));
@@ -1238,7 +1240,12 @@ impl ConfigUi {
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("默认程序"))
-                    .child(self.input(&self.default_prog_input)),
+                    .child(self.input(&self.default_prog_input))
+                    .child(btn("浏览…", cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.pick_default_prog_file(window, cx)
+                    })))
+                    .child(div().text_size(px(11.)).text_color(theme::fg_dim())
+                        .child("可执行文件路径；留空跟随默认（自动探测 pwsh 7 / powershell）")),
             )
             .child(self.render_setting_rows(4, cx))
     }
@@ -1538,13 +1545,25 @@ impl ConfigUi {
         self.select_ssh(i, cx);
     }
 
-    /// 弹出系统文件选择框选私钥文件，结果写回私钥路径输入框。
+    /// 弹出系统文件选择框选 SSH 私钥文件，结果写回私钥路径输入框。
     /// gpui Windows 无现成文件对话框，直接调 Win32 comdlg32 GetOpenFileNameW
     /// （PowerShell 子进程方案会闪 conhost 终端窗体，已废弃）。
     /// 同步等待返回（对话框打开期间配置窗口不重绘，属可接受代价）。
     fn pick_private_key_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = pick_file_win32(window, "选择 SSH 私钥文件");
         if let (Some(path), Some(entity)) = (path, self.ssh_key_input.as_ref()) {
+            entity.update(cx, |input, cx| {
+                input.content = path.into();
+                cx.notify();
+            });
+        }
+    }
+
+    /// 弹出系统文件选择框选默认启动程序（可执行文件），结果写回输入框。
+    /// 触发输入框的 observe 联动（split 逗号参数 → form.default_prog），无需重复赋值。
+    fn pick_default_prog_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = pick_file_win32(window, "选择默认启动程序");
+        if let (Some(path), Some(entity)) = (path, self.default_prog_input.as_ref()) {
             entity.update(cx, |input, cx| {
                 input.content = path.into();
                 cx.notify();

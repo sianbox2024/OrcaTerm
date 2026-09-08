@@ -18,12 +18,23 @@ fn dist_config_launch_menu_has_admin_entries_and_ssh() {
         labels,
         [
             "新CMD窗口",
-            "新PowerShell窗口",
+            "新PowerShell 7窗口",
             "新管理员CMD窗口",
-            "新管理员PowerShell窗口",
+            "新管理员PowerShell 7窗口",
             "MSI"
         ],
         "菜单应为 4 固定 shell + SSH 顺延"
+    );
+
+    // 默认 shell 指向本机 pwsh 7
+    assert_eq!(
+        json["default_prog"],
+        serde_json::json!(["D:/Tools/PowerShell/7/pwsh.exe", "-NoLogo"])
+    );
+    // PowerShell 菜单项同样指向 pwsh 7
+    assert_eq!(
+        menu[1]["args"],
+        serde_json::json!(["D:/Tools/PowerShell/7/pwsh.exe", "-NoLogo"])
     );
 
     // 管理员两项通过原生 elevate=true 提权（UAC → 提权新 GUI 实例）
@@ -34,7 +45,7 @@ fn dist_config_launch_menu_has_admin_entries_and_ssh() {
     assert_eq!(menu[2]["elevate"], serde_json::json!(true));
     assert_eq!(
         menu[3]["args"],
-        serde_json::json!(["powershell.exe"])
+        serde_json::json!(["D:/Tools/PowerShell/7/pwsh.exe", "-NoLogo"])
     );
     assert_eq!(menu[3]["elevate"], serde_json::json!(true));
 
