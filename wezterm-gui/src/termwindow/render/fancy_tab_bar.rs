@@ -13,6 +13,12 @@ use wezterm_font::LoadedFont;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
 use window::{IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
+/// 内置 iconfont 的字形码点（私有区，见 assets/fonts/iconfont.ttf）
+pub mod iconfont_glyph {
+    pub const SETTINGS: char = '\u{e607}';
+    pub const COPY: char = '\u{e65f}';
+}
+
 const X_BUTTON: &[Poly] = &[
     Poly {
         path: &[
@@ -51,85 +57,8 @@ const PLUS_BUTTON: &[Poly] = &[
     },
 ];
 
-/// 设置按钮齿轮图标：外圈 + 轴心 + 六根辐条。矢量绘制不依赖字体回退链
-/// （此前用 U+2699 字形，用户终端字体含该字形时会被 nerd 字体的窄小设计替换，
-/// 且 emoji 回退字形会被压缩缩放，表现为换字体后图标突然变小）。
-const GEAR_BUTTON: &[Poly] = &[
-    // 外圈
-    Poly {
-        path: &[PolyCommand::Circle {
-            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            radius: BlockCoord::Frac(9, 20),
-        }],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    // 轴心
-    Poly {
-        path: &[PolyCommand::Circle {
-            center: (BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            radius: BlockCoord::Frac(1, 5),
-        }],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    // 六根辐条（齿轮齿），每 60° 一根，从轴心延伸到外圈
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::Frac(1, 2), BlockCoord::Zero),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(1, 6)),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::One, BlockCoord::Frac(5, 6)),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::Frac(1, 2), BlockCoord::One),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Frac(5, 6)),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-    Poly {
-        path: &[
-            PolyCommand::MoveTo(BlockCoord::Frac(1, 2), BlockCoord::Frac(1, 2)),
-            PolyCommand::LineTo(BlockCoord::Zero, BlockCoord::Frac(1, 6)),
-            PolyCommand::Close,
-        ],
-        intensity: BlockAlpha::Full,
-        style: PolyStyle::Outline,
-    },
-];
-
+/// 设置/复制按钮改用内置 iconfont 字形（见 iconfont_glyph）渲染，
+/// 由专用字体实例（句柄链仅含 iconfont）绘制，不受终端字体回退链影响。
 impl crate::TermWindow {
     pub fn invalidate_fancy_tab_bar(&mut self) {
         self.fancy_tab_bar.take();
@@ -138,6 +67,7 @@ impl crate::TermWindow {
     pub fn build_fancy_tab_bar(&self, palette: &ColorPalette) -> anyhow::Result<ComputedElement> {
         let tab_bar_height = self.tab_bar_pixel_height()?;
         let font = self.fonts.title_font()?;
+        let icon_font = self.fonts.icon_font()?;
         let metrics = RenderMetrics::with_font_metrics(&font.metrics());
         let items = self.tab_bar.items();
         let colors = self
@@ -376,18 +306,10 @@ impl crate::TermWindow {
                 TabBarItem::ConfigUIButton => {
                     let new_tab = colors.new_tab();
                     let new_tab_hover = colors.new_tab_hover();
-                    // 矢量齿轮（GEAR_BUTTON），尺寸公式与"+"按钮一致：
-                    // 标题字体 cell 高的一半，换终端字体不影响图标大小
+                    // iconfont 设置字形（U+E607），用专用图标字体渲染
                     Element::new(
-                        &font,
-                        ElementContent::Poly {
-                            line_width: metrics.underline_height.max(2),
-                            poly: SizedPoly {
-                                poly: GEAR_BUTTON,
-                                width: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
-                                height: Dimension::Pixels(metrics.cell_size.height as f32 / 2.),
-                            },
-                        },
+                        &icon_font,
+                        ElementContent::Text(iconfont_glyph::SETTINGS.to_string()),
                     )
                     .vertical_align(VerticalAlign::Middle)
                     .item_type(UIItemType::TabBar(item.item.clone()))
@@ -418,18 +340,19 @@ impl crate::TermWindow {
                 TabBarItem::CopyScreenButton => {
                     let new_tab = colors.new_tab();
                     let new_tab_hover = colors.new_tab_hover();
-                    // 复制成功反馈期内：图标变 ✓ 并高亮
-                    let copied = self
+                    // 复制成功反馈期内高亮（✓ 反馈由 classic 标签栏路径显示）
+                    let normal_colors = if self
                         .copy_button_feedback
-                        .map_or(false, |t| t.elapsed() < Duration::from_millis(1500));
-                    let (icon, normal_colors) = if copied {
-                        ("✓", new_tab_hover.clone())
+                        .map_or(false, |t| t.elapsed() < Duration::from_millis(1500))
+                    {
+                        new_tab_hover.clone()
                     } else {
-                        ("❐", new_tab)
+                        new_tab
                     };
+                    // iconfont 复制字形（U+E65F），用专用图标字体渲染
                     Element::new(
-                        &font,
-                        ElementContent::Text(icon.to_string()),
+                        &icon_font,
+                        ElementContent::Text(iconfont_glyph::COPY.to_string()),
                     )
                     .vertical_align(VerticalAlign::Middle)
                     .item_type(UIItemType::TabBar(item.item.clone()))

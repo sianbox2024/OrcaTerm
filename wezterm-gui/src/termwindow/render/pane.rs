@@ -516,6 +516,7 @@ impl crate::TermWindow {
                                 default_bg: self.default_bg,
                                 font: None,
                                 style: None,
+                                icon_font: None,
                                 use_pixel_positioning: self
                                     .term_window
                                     .config

@@ -12,6 +12,8 @@ vendor-jetbrains = []
 vendor-roboto = []
 vendor-noto-emoji = []
 vendor-nerd-font-symbols = []
+# UI 图标字体（标签栏按钮字形），始终随二进制分发
+vendor-iconfont = []
 
 [dependencies]
 anyhow.workspace = true

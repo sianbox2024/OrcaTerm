@@ -90,6 +90,8 @@ pub struct LineToElementParams<'a> {
     pub window_is_transparent: bool,
     pub reverse_video: bool,
     pub shape_key: &'a Option<LineToEleShapeCacheKey>,
+    /// 含 iconfont 码点的簇改用该专用字体渲染（classic 标签栏按钮）
+    pub icon_font: Option<&'a Rc<LoadedFont>>,
 }
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
@@ -160,6 +162,9 @@ pub struct RenderScreenLineParams<'a> {
     /// the resolved title font
     pub font: Option<Rc<LoadedFont>>,
     pub style: Option<&'a TextStyle>,
+    /// 内置 iconfont 字体实例；classic 标签栏按钮的 PUA 码点用它渲染，
+    /// 避免 nerd/回退字体抢先（Nerd Font devicons 范围与 E6xx 重叠）
+    pub icon_font: Option<Rc<LoadedFont>>,
 
     /// If true, use the shaper-determined pixel positions,
     /// rather than using monospace cell based positions.

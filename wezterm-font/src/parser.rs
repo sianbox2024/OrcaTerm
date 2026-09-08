@@ -865,6 +865,9 @@ pub(crate) fn load_built_in_fonts(font_info: &mut Vec<ParsedFont>) -> anyhow::Re
         &[font!("../../assets/fonts/NotoColorEmoji.ttf")],
         #[cfg(any(test, feature = "vendor-nerd-font-symbols"))]
         &[font!("../../assets/fonts/SymbolsNerdFontMono-Regular.ttf")],
+        // OrcaTerm UI 图标字体（家族名 "iconfont"），供标签栏按钮字形使用
+        #[cfg(any(test, feature = "vendor-iconfont"))]
+        &[font!("../../assets/fonts/iconfont.ttf")],
     ];
     for bundle in built_ins {
         for (data, name) in bundle.iter() {

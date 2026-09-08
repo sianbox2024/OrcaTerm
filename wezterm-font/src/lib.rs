@@ -473,6 +473,7 @@ struct FontConfigInner {
     pane_select_font: RefCell<Option<Rc<LoadedFont>>>,
     char_select_font: RefCell<Option<Rc<LoadedFont>>>,
     command_palette_font: RefCell<Option<Rc<LoadedFont>>>,
+    icon_font: RefCell<Option<Rc<LoadedFont>>>,
     fallback_channel: RefCell<Option<Sender<FallbackResolveInfo>>>,
 }
 
@@ -494,6 +495,7 @@ impl FontConfigInner {
             pane_select_font: RefCell::new(None),
             char_select_font: RefCell::new(None),
             command_palette_font: RefCell::new(None),
+            icon_font: RefCell::new(None),
             font_scale: RefCell::new(1.0),
             dpi: RefCell::new(dpi),
             config: RefCell::new(config.clone()),
@@ -512,6 +514,7 @@ impl FontConfigInner {
         self.pane_select_font.borrow_mut().take();
         self.char_select_font.borrow_mut().take();
         self.command_palette_font.borrow_mut().take();
+        self.icon_font.borrow_mut().take();
         self.metrics.borrow_mut().take();
         *self.font_dirs.borrow_mut() = Arc::new(FontDatabase::with_font_dirs(config)?);
         Ok(())
@@ -663,6 +666,70 @@ impl FontConfigInner {
         let loaded = self.make_entity_font_impl(myself, Entity::Title)?;
 
         title_font.replace(Rc::clone(&loaded));
+
+        Ok(loaded)
+    }
+
+    /// 构建专用于 UI 图标字形的 LoadedFont：句柄链里只含内置 "iconfont"
+    /// 一个字体，不追加任何回退，避免回退链（如 nerd 字体的 E6xx 范围、
+    /// 用户终端字体）抢先渲染私有区图标码点。
+    fn make_icon_font_impl(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+        let config = self.config.borrow();
+        let dpi = *self.dpi.borrow() as u32;
+
+        // 与标题字体同一像素尺寸逻辑：默认 10pt（Windows），跟随 DPI。
+        let font_size = if cfg!(windows) { 10. } else { 12. };
+        let pixel_size = (font_size * dpi as f64 / 72.0) as u16;
+
+        let attributes = [FontAttributes::new("iconfont")];
+        let (handles, _loaded) = self.resolve_font_helper_impl(&attributes, pixel_size)?;
+
+        if handles.is_empty() {
+            anyhow::bail!("built-in iconfont font is not available");
+        }
+
+        let shaper = new_shaper(&*config, &handles)?;
+
+        let metrics = shaper.metrics(font_size, dpi).with_context(|| {
+            format!(
+                "obtaining metrics for icon font_size={} @ dpi {}",
+                font_size, dpi
+            )
+        })?;
+
+        let text_style = TextStyle {
+            foreground: None,
+            font: vec![FontAttributes::new("iconfont")],
+        };
+
+        let loaded = Rc::new(LoadedFont {
+            rasterizers: RefCell::new(HashMap::new()),
+            handles: RefCell::new(handles),
+            shaper: RefCell::new(shaper),
+            metrics,
+            font_size,
+            dpi,
+            font_config: Rc::downgrade(myself),
+            pending_fallback: Arc::new(Mutex::new(vec![])),
+            text_style,
+            id: alloc_font_id(),
+            tried_glyphs: RefCell::new(HashSet::new()),
+            pixel_geometry: config.display_pixel_geometry,
+        });
+
+        Ok(loaded)
+    }
+
+    fn icon_font(&self, myself: &Rc<Self>) -> anyhow::Result<Rc<LoadedFont>> {
+        let mut icon_font = self.icon_font.borrow_mut();
+
+        if let Some(entry) = icon_font.as_ref() {
+            return Ok(Rc::clone(entry));
+        }
+
+        let loaded = self.make_icon_font_impl(myself)?;
+
+        icon_font.replace(Rc::clone(&loaded));
 
         Ok(loaded)
     }
@@ -1065,6 +1132,12 @@ impl FontConfiguration {
 
     pub fn title_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
         self.inner.title_font(&self.inner)
+    }
+
+    /// UI 图标字体（内置 iconfont，仅含 OrcaTerm 按钮字形）。
+    /// 句柄链中只有该字体本身，渲染图标码点不受回退链影响。
+    pub fn icon_font(&self) -> anyhow::Result<Rc<LoadedFont>> {
+        self.inner.icon_font(&self.inner)
     }
 
     pub fn command_palette_font(&self) -> anyhow::Result<Rc<LoadedFont>> {

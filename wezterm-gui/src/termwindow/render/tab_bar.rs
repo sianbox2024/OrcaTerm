@@ -95,6 +95,8 @@ impl crate::TermWindow {
                 default_bg,
                 style: None,
                 font: None,
+                // 按钮的 iconfont 码点需要专用字体实例渲染
+                icon_font: Some(self.fonts.icon_font()?),
                 use_pixel_positioning: self.config.experimental_pixel_positioning,
                 render_metrics: self.render_metrics,
                 shape_key: None,

@@ -625,7 +625,9 @@ impl TabBarState {
 
         // Config UI button
         {
-            let gear = "⚙";
+            // iconfont 设置字形（U+E607）；classic 标签栏下该码点由
+            // paint_tab_bar 传入的 icon_font 专用字体渲染
+            let gear = "\u{e607}";
             let gear_line = parse_status_text(gear, black_cell.attrs().clone());
             let gear_hover_line = parse_status_text(gear, inactive_hover_attrs.clone());
             let hover = is_tab_hover(mouse_x, x, gear_line.len());
@@ -644,7 +646,8 @@ impl TabBarState {
 
         // Copy screen button
         {
-            let copy_icon = if copy_button_feedback { "✓" } else { "❐" };
+            // iconfont 复制字形（U+E65F）；反馈期保持 ✓
+            let copy_icon = if copy_button_feedback { "✓" } else { "\u{e65f}" };
             let copy_line = parse_status_text(
                 copy_icon,
                 if copy_button_feedback {

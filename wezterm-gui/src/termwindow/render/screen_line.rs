@@ -18,6 +18,12 @@ use wezterm_bidi::Direction;
 use wezterm_term::color::ColorAttribute;
 use wezterm_term::CellAttributes;
 
+/// iconfont 字形所在的码点范围（U+E600..=U+E6FF，见 assets/fonts/iconfont.ttf）。
+/// 该范围内的簇在提供 icon_font 时改用专用字体渲染。
+pub fn is_iconfont_codepoint(c: char) -> bool {
+    ('\u{e600}'..='\u{e6ff}').contains(&c)
+}
+
 impl crate::TermWindow {
     /// "Render" a line of the terminal screen into the vertex buffer.
     /// This is nominally a matter of setting the fg/bg color and the
@@ -148,6 +154,7 @@ impl crate::TermWindow {
                 window_is_transparent: params.window_is_transparent,
                 reverse_video: params.dims.reverse_video,
                 shape_key: &params.shape_key,
+                icon_font: params.icon_font.as_ref(),
             };
 
             let (shaped, invalidate_on_hover) = self.build_line_element_shape(params)?;
@@ -858,13 +865,28 @@ impl crate::TermWindow {
 
             let style_params = last_style.as_ref().expect("we just set it up").clone();
 
-            let glyph_info = self.cached_cluster_shape(
-                style_params.style,
-                &cluster,
-                &gl_state,
-                None,
-                &self.render_metrics,
-            )?;
+            // iconfont 的图标码点（私有区）由专用字体渲染，绕开按名称解析的
+            // 字体链，避免 Nerd Font devicons（E600-E6C8）等回退字体抢先。
+            let icon_cluster = params
+                .icon_font
+                .filter(|_| cluster.text.chars().any(is_iconfont_codepoint));
+            let glyph_info = if let Some(icon_font) = icon_cluster {
+                self.cached_cluster_shape(
+                    style_params.style,
+                    &cluster,
+                    &gl_state,
+                    Some(icon_font),
+                    &self.render_metrics,
+                )?
+            } else {
+                self.cached_cluster_shape(
+                    style_params.style,
+                    &cluster,
+                    &gl_state,
+                    None,
+                    &self.render_metrics,
+                )?
+            };
             let pixel_width = glyph_info
                 .iter()
                 .map(|info| info.glyph.x_advance.get() as f32)
