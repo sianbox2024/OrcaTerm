@@ -228,9 +228,10 @@ pub fn emit_launch_menu(conns: &[SshConnection]) -> String {
         if name.is_empty() {
             continue;
         }
+        // 菜单标签带「SSH连接」前缀，DomainName 仍用原名匹配 ssh_domains
         out.push_str(&format!(
             "  {{ label={}, domain={{ DomainName={} }} }},\n",
-            quote(name),
+            quote(&format!("SSH连接（{name}）")),
             quote(name)
         ));
     }
@@ -410,12 +411,16 @@ mod tests {
             "管理员 PowerShell 项应与普通项使用同一 shell：{lua}"
         );
         assert!(!lua.contains("'sudo'"), "不应再依赖 sudo：{lua}");
-        // SSH 条目直接以连接名作为菜单标签，按配置顺序排在四个 shell 之后
+        // SSH 条目菜单标签带「SSH连接」前缀，DomainName 仍用连接原名，
+        // 按配置顺序排在四个 shell 之后
         let cmd_pos = lua.find("label='新CMD窗口'").unwrap();
         let admin_pos = lua.find("label='新管理员CMD窗口'").unwrap();
-        let ssh_pos = lua.find("label='MSI'").unwrap();
+        let ssh_pos = lua.find("label='SSH连接（MSI）'").unwrap();
         assert!(cmd_pos < admin_pos && admin_pos < ssh_pos, "{lua}");
-        assert!(lua.contains("domain={ DomainName='MSI' }"), "{lua}");
+        assert!(
+            lua.contains("label='SSH连接（MSI）', domain={ DomainName='MSI' }"),
+            "{lua}"
+        );
         let empty = emit_launch_menu(&[]);
         assert!(
             empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell") && !empty.contains("DomainName"),

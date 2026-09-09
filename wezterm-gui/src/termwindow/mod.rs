@@ -1759,6 +1759,13 @@ impl TermWindow {
         self.config = config.clone();
         self.palette.take();
 
+        // GUI 启动后才新增/修改的 ssh_domains（配置界面保存→热重载）也要注册进
+        // mux，否则菜单项引用的 DomainName 查不到，点击只是静默失败（错误仅进日志）。
+        // update_mux_domains 对已存在的域名跳过，重启/多次重载均幂等。
+        if let Err(err) = wezterm_mux_server_impl::update_mux_domains(&config::configuration()) {
+            log::error!("Error updating mux domains after reload: {:#}", err);
+        }
+
         let mux = Mux::get();
         let window = match mux.get_window(self.mux_window_id) {
             Some(window) => window,
