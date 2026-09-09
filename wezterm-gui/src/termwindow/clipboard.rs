@@ -49,7 +49,11 @@ impl TermWindow {
                             mux.get_pane(pane_id)
                         })
                     {
-                        pane.send_paste(&clip).ok();
+                        // 粘贴等价于逐字符"敲入"剪贴板内容: 复制源常在文末附带换行,
+                        // 直接发送会被 shell 当作回车执行（多行续行命令因此被提前
+                        // 分行执行）。去掉结尾换行，只粘贴、不回车，由用户手动提交。
+                        let trimmed = clip.trim_end_matches(['\r', '\n']);
+                        pane.send_paste(trimmed).ok();
                     }
                 })));
             }

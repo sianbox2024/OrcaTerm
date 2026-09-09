@@ -46,25 +46,9 @@ const EASINGS: &[(&str, &str)] = &[
 /// 伪设置项 key：不对应 Config 结构字段；开=发射固定的一段 mouse_bindings，关=不发射。
 pub const RIGHT_CLICK_SMART_KEY: &str = "right_click_smart_copy_paste";
 
-/// 右键智能复制/粘贴绑定：有选中文本→复制进剪贴板并清除选中，无选中→粘贴剪贴板。
-/// 引用 `wezterm.action_callback`，依赖文件头部的 `local wezterm = require 'wezterm'`。
-const SMART_RIGHT_CLICK_LUA: &str = "\
-config.mouse_bindings = {
-  {
-    event = { Down = { streak = 1, button = 'Right' } },
-    mods = 'NONE',
-    action = wezterm.action_callback(function(window, pane)
-      local sel_text = window:get_selection_text_for_pane(pane)
-      if sel_text ~= nil and #sel_text > 0 then
-        window:perform_action(wezterm.action.CopyTo 'Clipboard', pane)
-        window:perform_action(wezterm.action.ClearSelection, pane)
-      else
-        window:perform_action(wezterm.action.PasteFrom 'Clipboard', pane)
-      end
-    end),
-  },
-}
-";
+/// 右键智能复制/粘贴绑定：唯一事实源在 config crate（默认配置文件与
+/// 本伪设置项发射共用同一块，避免文案漂移）。有选中→复制，无选中→粘贴。
+const SMART_RIGHT_CLICK_LUA: &str = config::Config::SMART_RIGHT_CLICK_LUA;
 
 pub static SETTINGS: &[SettingSpec] = &[
     // ---------- 页面 0：字体与光标 ----------
@@ -751,6 +735,49 @@ mod tests {
         let fm = SettingsForm::from_snapshot(&defaults);
         let lua = fm.to_lua(&defaults);
         assert!(!lua.contains("mouse_bindings"), "{lua}");
+    }
+
+    /// 首启自动生成的默认配置必须能通过真实加载链路，且默认值符合产品要求：
+    /// 默认程序 pwsh、Aardvark Blue、右键智能复制/粘贴开、launch_menu 四项（后两项提权）。
+    #[test]
+    fn generated_default_orca_config_loads_with_expected_defaults() {
+        let src = config::Config::default_orca_config_lua();
+        assert!(src.contains("mouse_bindings"), "占位符应已替换: {src}");
+        let loaded =
+            crate::load::load_from_source(&src, std::path::Path::new("orca-config.lua")).unwrap();
+        let cfg = &loaded.config;
+        assert_eq!(cfg.color_scheme.as_deref(), Some("Aardvark Blue"));
+        let expected_prog: &[String] =
+            &[r"D:\Tools\PowerShell\7\pwsh.exe".into(), "-NoLogo".into()];
+        assert_eq!(
+            cfg.default_prog.as_deref(),
+            Some(expected_prog),
+            "default_prog 应为 pwsh 绝对路径 + -NoLogo"
+        );
+        assert_eq!(cfg.mouse_bindings.len(), 1, "右键智能复制/粘贴应默认开启");
+        assert_eq!(cfg.launch_menu.len(), 4);
+        let labels: Vec<&str> = cfg
+            .launch_menu
+            .iter()
+            .map(|c| c.label.as_deref().unwrap_or_default())
+            .collect();
+        assert_eq!(
+            labels,
+            vec![
+                "新CMD窗口",
+                "新PowerShell窗口",
+                "新管理员CMD窗口",
+                "新管理员PowerShell窗口"
+            ]
+        );
+        assert!(
+            !cfg.launch_menu[0].elevate && !cfg.launch_menu[1].elevate,
+            "普通项不应提权"
+        );
+        assert!(
+            cfg.launch_menu[2].elevate && cfg.launch_menu[3].elevate,
+            "管理员项应提权"
+        );
     }
 
     /// 枚举项基线读出真实默认（如 win32_system_backdrop=Auto），未改动时不得发射。

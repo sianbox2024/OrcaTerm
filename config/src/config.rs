@@ -25,7 +25,7 @@ use crate::{
     default_true, default_win32_acrylic_accent_color, CellWidth, GpuInfo,
     IntegratedTitleButtonColor, KeyMapPreference, LoadedConfig, MouseEventTriggerMods, RgbaColor,
     SerialDomain, SystemBackdrop, WebGpuPowerPreference, CONFIG_DIRS, CONFIG_FILE_OVERRIDE,
-    CONFIG_OVERRIDES, CONFIG_SKIP, HOME_DIR,
+    CONFIG_OVERRIDES, CONFIG_SKIP,
 };
 use anyhow::Context;
 use luahelper::impl_lua_conversion_dynamic;
@@ -1014,6 +1014,65 @@ impl Config {
         Ok(())
     }
 
+    /// orca-term: 「右键智能复制/粘贴」mouse_bindings 块的唯一事实源。
+    /// 默认配置文件生成（DEFAULT_ORCA_CONFIG_LUA）与配置界面伪设置项
+    /// 发射（config-ui-core）都引用它，避免两处文案漂移。
+    pub const SMART_RIGHT_CLICK_LUA: &'static str = "\
+config.mouse_bindings = {
+  {
+    event = { Down = { streak = 1, button = 'Right' } },
+    mods = 'NONE',
+    action = wezterm.action_callback(function(window, pane)
+      local sel_text = window:get_selection_text_for_pane(pane)
+      if sel_text ~= nil and #sel_text > 0 then
+        window:perform_action(wezterm.action.CopyTo 'Clipboard', pane)
+        window:perform_action(wezterm.action.ClearSelection, pane)
+      else
+        window:perform_action(wezterm.action.PasteFrom 'Clipboard', pane)
+      end
+    end),
+  },
+}
+";
+
+    /// 首次启动的默认 orca-config.lua（便携包开箱即用）。
+    /// %SMART_RIGHT_CLICK% 占位符在生成时替换为 SMART_RIGHT_CLICK_LUA，
+    /// 见 default_orca_config_lua。
+    pub const DEFAULT_ORCA_CONFIG_LUA: &'static str = "\
+-- OrcaTerm 便携配置（程序首次启动时自动生成；删除本文件并重启会重新生成；
+-- 可手动编辑，也可由配置界面保存，支持热重载）
+local wezterm = require 'wezterm'
+
+local config = {}
+if wezterm.config_builder then
+  config = wezterm.config_builder()
+end
+
+-- 默认程序
+config.default_prog = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }
+
+-- 配色方案
+config.color_scheme = 'Aardvark Blue'
+
+-- 右键智能复制/粘贴：有选中 -> 复制，无选中 -> 粘贴（只粘贴不回车）
+%SMART_RIGHT_CLICK%
+
+-- 右键点击标签栏加号的启动菜单（elevate 项经 UAC 提权，另开独立窗口）
+config.launch_menu = {
+  { label = '新CMD窗口', args = { 'cmd.exe' } },
+  { label = '新PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' } },
+  { label = '新管理员CMD窗口', args = { 'cmd.exe' }, elevate = true },
+  { label = '新管理员PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }, elevate = true },
+}
+
+return config
+";
+
+    /// 组装首次启动默认配置文件内容：替换智能复制/粘贴块占位符。
+    pub fn default_orca_config_lua() -> String {
+        Self::DEFAULT_ORCA_CONFIG_LUA.replace("%SMART_RIGHT_CLICK%", Self::SMART_RIGHT_CLICK_LUA)
+    }
+
     pub fn load_with_overrides(overrides: &wezterm_dynamic::Value) -> LoadedConfig {
         // Note that the directories crate has methods for locating project
         // specific config directories, but only returns one of them, not
@@ -1025,13 +1084,32 @@ impl Config {
         // 否则便携配置缺失时会静默改用用户配置且监听挂错文件，
         // 表现为「配置界面保存后不热生效、重启才生效」。
         let mut paths = vec![];
-        if let Ok(exe_name) = std::env::current_exe() {
-            if let Some(exe_dir) = exe_name.parent() {
-                let gui_config = exe_dir.join("orca-config.lua");
-                if gui_config.exists() {
-                    paths.push(PathPossibility::optional(gui_config));
+        let portable_config = std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("orca-config.lua")));
+        // 便携配置缺失时先生成默认文件，再走下面的正常加载路径，
+        // 使默认值在本次启动立即生效；WEZTERM_CONFIG_FILE / 内部 override
+        // 的开发通道下不生成，避免文件副作用。
+        if portable_config.is_some()
+            && std::env::var_os("WEZTERM_CONFIG_FILE").is_none()
+            && CONFIG_FILE_OVERRIDE.lock().unwrap().is_none()
+        {
+            if let Some(path) = portable_config.as_ref() {
+                if !path.exists() {
+                    if let Err(err) = std::fs::write(path, Self::default_orca_config_lua()) {
+                        log::error!(
+                            "生成默认配置 {} 失败：{:#}，本次使用内置默认值",
+                            path.display(),
+                            err
+                        );
+                    } else {
+                        log::info!("已生成默认配置：{}", path.display());
+                    }
                 }
             }
+        }
+        if let Some(path) = portable_config.as_ref().filter(|path| path.exists()) {
+            paths.push(PathPossibility::optional(path.clone()));
         }
         if let Some(path) = std::env::var_os("WEZTERM_CONFIG_FILE") {
             log::trace!("Note: WEZTERM_CONFIG_FILE is set in the environment");

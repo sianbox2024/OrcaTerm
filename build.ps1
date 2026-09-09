@@ -1,4 +1,4 @@
-# 构建 orca-term 主程序并输出到 portable 分发目录。
+﻿# 构建 orca-term 主程序并输出到 portable 分发目录。
 # 用法：pwsh ./build.ps1   （可选参数：-Profile release 用 --release 构建）
 param([string]$Profile = "debug")
 

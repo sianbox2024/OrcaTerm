@@ -483,7 +483,20 @@ impl super::TermWindow {
                     };
                     if let Ok(exe) = std::env::current_exe() {
                         if let Some(dir) = exe.parent() {
-                            let _ = std::process::Command::new(dir.join(exe_name)).spawn();
+                            let candidate = dir.join(exe_name);
+                            match std::process::Command::new(&candidate).spawn() {
+                                Ok(_) => {}
+                                Err(err) => {
+                                    // 可执行文件缺失（如从构建目录直接运行、未随包分发
+                                    // config-ui）时提示，而不是静默无反应
+                                    log::error!(
+                                        "无法启动设置程序 {}：{:#}；请确认 orca-term-config-ui \
+                                         与主程序位于同一目录",
+                                        candidate.display(),
+                                        err
+                                    );
+                                }
+                            }
                         }
                     }
                 }

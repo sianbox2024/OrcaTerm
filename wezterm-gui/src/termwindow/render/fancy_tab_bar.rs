@@ -19,6 +19,33 @@ pub mod iconfont_glyph {
     pub const COPY: char = '\u{e65f}';
 }
 
+/// 三个标签栏按钮（+/齿轮/复制）的图标默认蓝色；
+/// hover 时稍微提亮。复制成功反馈期图标转绿色。
+/// sRGB 值，构造时需经 to_linear() 转换。
+mod button_colors {
+    use ::window::color::LinearRgba;
+
+    pub const ICON_BLUE: [u8; 3] = [0x2f, 0x81, 0xf7];
+    pub const ICON_BLUE_HOVER: [u8; 3] = [0x5a, 0x9d, 0xf9];
+    pub const ICON_GREEN: [u8; 3] = [0x3f, 0xb9, 0x50];
+
+    fn linear(rgb: [u8; 3]) -> LinearRgba {
+        LinearRgba::with_srgba(rgb[0], rgb[1], rgb[2], 0xff)
+    }
+
+    pub fn icon_blue() -> LinearRgba {
+        linear(ICON_BLUE)
+    }
+
+    pub fn icon_blue_hover() -> LinearRgba {
+        linear(ICON_BLUE_HOVER)
+    }
+
+    pub fn icon_green() -> LinearRgba {
+        linear(ICON_GREEN)
+    }
+}
+
 const X_BUTTON: &[Poly] = &[
     Poly {
         path: &[
@@ -168,12 +195,13 @@ impl crate::TermWindow {
                 .colors(ElementColors {
                     border: BorderColor::default(),
                     bg: new_tab.bg_color.to_linear().into(),
-                    text: new_tab.fg_color.to_linear().into(),
+                    // "+" 图标默认蓝色
+                    text: button_colors::icon_blue().into(),
                 })
                 .hover_colors(Some(ElementColors {
                     border: BorderColor::default(),
                     bg: new_tab_hover.bg_color.to_linear().into(),
-                    text: new_tab_hover.fg_color.to_linear().into(),
+                    text: button_colors::icon_blue_hover().into(),
                 })),
                 TabBarItem::Tab { active, .. } if active => element
                     .vertical_align(VerticalAlign::Bottom)
@@ -329,27 +357,30 @@ impl crate::TermWindow {
                     .colors(ElementColors {
                         border: BorderColor::default(),
                         bg: new_tab.bg_color.to_linear().into(),
-                        text: new_tab.fg_color.to_linear().into(),
+                        // 齿轮图标默认蓝色
+                        text: button_colors::icon_blue().into(),
                     })
                     .hover_colors(Some(ElementColors {
                         border: BorderColor::default(),
                         bg: new_tab_hover.bg_color.to_linear().into(),
-                        text: new_tab_hover.fg_color.to_linear().into(),
+                        text: button_colors::icon_blue_hover().into(),
                     }))
                 }
                 TabBarItem::CopyScreenButton => {
                     let new_tab = colors.new_tab();
                     let new_tab_hover = colors.new_tab_hover();
-                    // 复制成功反馈期内高亮（✓ 反馈由 classic 标签栏路径显示）
-                    let normal_colors = if self
+                    // 复制成功反馈期内图标转绿色，1.5s 后由
+                    // mouseevent.rs 的定时器清除状态恢复蓝色。
+                    // 字形保持 iconfont 复制图标不变——iconfont 只有
+                    // PUA 图标字形，✓(U+2713) 等字符在其中不可见。
+                    let copied = self
                         .copy_button_feedback
-                        .map_or(false, |t| t.elapsed() < Duration::from_millis(1500))
-                    {
-                        new_tab_hover.clone()
+                        .map_or(false, |t| t.elapsed() < Duration::from_millis(1500));
+                    let icon_color = if copied {
+                        button_colors::icon_green()
                     } else {
-                        new_tab
+                        button_colors::icon_blue()
                     };
-                    // iconfont 复制字形（U+E65F），用专用图标字体渲染
                     Element::new(
                         &icon_font,
                         ElementContent::Text(iconfont_glyph::COPY.to_string()),
@@ -371,13 +402,18 @@ impl crate::TermWindow {
                     .border(BoxDimension::new(Dimension::Pixels(1.)))
                     .colors(ElementColors {
                         border: BorderColor::default(),
-                        bg: normal_colors.bg_color.to_linear().into(),
-                        text: normal_colors.fg_color.to_linear().into(),
+                        bg: new_tab.bg_color.to_linear().into(),
+                        text: icon_color.into(),
                     })
                     .hover_colors(Some(ElementColors {
                         border: BorderColor::default(),
                         bg: new_tab_hover.bg_color.to_linear().into(),
-                        text: new_tab_hover.fg_color.to_linear().into(),
+                        text: if copied {
+                            button_colors::icon_green()
+                        } else {
+                            button_colors::icon_blue_hover()
+                        }
+                        .into(),
                     }))
                 }
             }

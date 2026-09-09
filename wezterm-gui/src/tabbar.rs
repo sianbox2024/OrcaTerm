@@ -1,5 +1,5 @@
 use crate::termwindow::{PaneInformation, TabInformation, UIItem, UIItemType};
-use config::{ConfigHandle, TabBarColors};
+use config::{ConfigHandle, RgbaColor, TabBarColors};
 use finl_unicode::grapheme_clusters::Graphemes;
 use mlua::FromLua;
 use std::sync::LazyLock;
@@ -13,6 +13,20 @@ use termwiz::surface::SEQ_ZERO;
 use termwiz_funcs::{format_as_escapes, FormatColor, FormatItem};
 use wezterm_term::{Line, Progress};
 use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
+
+/// 三个标签栏按钮（+/齿轮/复制）图标的默认蓝色、hover 蓝与复制成功反馈绿，
+/// 与 fancy 标签栏（fancy_tab_bar.rs 的 button_colors）保持一致
+pub const BUTTON_ICON_BLUE: (u8, u8, u8) = (0x2f, 0x81, 0xf7);
+pub const BUTTON_ICON_BLUE_HOVER: (u8, u8, u8) = (0x5a, 0x9d, 0xf9);
+pub const BUTTON_ICON_GREEN: (u8, u8, u8) = (0x3f, 0xb9, 0x50);
+
+/// 按钮 icon cell 的属性：指定前景色 + 标签栏背景色
+fn button_icon_attrs(fg: (u8, u8, u8), bg: config::RgbaColor) -> CellAttributes {
+    let mut attr = CellAttributes::default();
+    attr.set_background(ColorSpec::TrueColor(bg.into()));
+    attr.set_foreground(ColorSpec::TrueColor(RgbaColor::from(fg).into()));
+    attr
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct TabBarState {
@@ -626,10 +640,17 @@ impl TabBarState {
         // Config UI button
         {
             // iconfont 设置字形（U+E607）；classic 标签栏下该码点由
-            // paint_tab_bar 传入的 icon_font 专用字体渲染
+            // paint_tab_bar 传入的 icon_font 专用字体渲染。
+            // 齿轮默认蓝色，hover 提亮（与 fancy 标签栏 button_colors 一致）
             let gear = "\u{e607}";
-            let gear_line = parse_status_text(gear, black_cell.attrs().clone());
-            let gear_hover_line = parse_status_text(gear, inactive_hover_attrs.clone());
+            let gear_line = parse_status_text(
+                gear,
+                button_icon_attrs(BUTTON_ICON_BLUE, colors.background()),
+            );
+            let gear_hover_line = parse_status_text(
+                gear,
+                button_icon_attrs(BUTTON_ICON_BLUE_HOVER, colors.background()),
+            );
             let hover = is_tab_hover(mouse_x, x, gear_line.len());
             let gear_button = if hover { &gear_hover_line } else { &gear_line };
             let button_start = x;
@@ -646,17 +667,28 @@ impl TabBarState {
 
         // Copy screen button
         {
-            // iconfont 复制字形（U+E65F）；反馈期保持 ✓
+            // iconfont 复制字形（U+E65F）；反馈期 ✓ 绿色表示已复制
             let copy_icon = if copy_button_feedback { "✓" } else { "\u{e65f}" };
+            let copy_fg = if copy_button_feedback {
+                BUTTON_ICON_GREEN
+            } else {
+                BUTTON_ICON_BLUE
+            };
             let copy_line = parse_status_text(
                 copy_icon,
-                if copy_button_feedback {
-                    new_tab_hover_attrs.clone()
-                } else {
-                    black_cell.attrs().clone()
-                },
+                button_icon_attrs(copy_fg, colors.background()),
             );
-            let copy_hover_line = parse_status_text(copy_icon, inactive_hover_attrs.clone());
+            let copy_hover_line = parse_status_text(
+                copy_icon,
+                button_icon_attrs(
+                    if copy_button_feedback {
+                        BUTTON_ICON_GREEN
+                    } else {
+                        BUTTON_ICON_BLUE_HOVER
+                    },
+                    colors.background(),
+                ),
+            );
             let hover = is_tab_hover(mouse_x, x, copy_line.len());
             let copy_button = if hover { &copy_hover_line } else { &copy_line };
             let button_start = x;
