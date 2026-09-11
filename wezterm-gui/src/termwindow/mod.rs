@@ -81,10 +81,13 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
+pub(crate) mod sftp_panel;
+pub(crate) mod sftp_transfer;
 pub mod spawn;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
+use sftp_panel::{SFTP_WINDOW_HEIGHT, SFTP_WINDOW_WIDTH};
 
 const ATLAS_SIZE: usize = 128;
 
@@ -105,6 +108,89 @@ pub fn set_window_class(cls: &str) {
 
 pub fn get_window_class() -> String {
     WINDOW_CLASS.lock().unwrap().clone()
+}
+
+/// 启动菜单流程(main.rs spawn_tab_in_domain_if_mux_is_empty 的
+/// show_launcher_on_startup 分支调用):
+/// 1. 等 frontend 为该 mux 窗口建出 OS 窗口(轮询 gui_windows,2s 超时);
+/// 2. 经 TermWindowNotif::Apply 在 TermWindow 事件线程上,
+///    对启动时正常 spawn 的真实 tab(默认 shell)弹 launcher。
+/// Esc 关闭菜单:shell 标签保留(与正常启动一致)。
+pub async fn startup_launcher_flow(
+    window_id: MuxWindowId,
+    starter_tab: Arc<mux::tab::Tab>,
+) {
+    // 等待 frontend 建出 OS 窗口
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let os_window = loop {
+        let found = crate::frontend::front_end()
+            .gui_windows()
+            .into_iter()
+            .find(|gw| gw.mux_window_id == window_id)
+            .map(|gw| gw.window);
+        if let Some(w) = found {
+            break w;
+        }
+        if std::time::Instant::now() > deadline {
+            log::warn!("startup_launcher_flow: window not ready in 2s, abort");
+            return;
+        }
+        smol::Timer::after(std::time::Duration::from_millis(50)).await;
+    };
+
+    let starter_tab_id = starter_tab.tab_id();
+    // 延迟一帧让首帧渲染完成,再弹菜单
+    smol::Timer::after(std::time::Duration::from_millis(150)).await;
+    let _ = os_window.notify(TermWindowNotif::Apply(Box::new(move |tw| {
+        tw.show_launcher_on_starter_tab(starter_tab_id);
+    })));
+}
+
+/// 启动菜单选中条目后的收尾:等新 tab 加入窗口(与初始 tab 不同),
+/// 然后自动移除初始 shell 标签,让菜单选中的结果成为唯一标签。
+/// 提权项(elevate)由独立管理员实例处理,本窗口不会新增 tab,不动初始标签;
+/// 超时(5s)则保留初始标签作为兜底。
+fn close_starter_tab_after_launch(
+    starter_tab_id: mux::tab::TabId,
+    entry: &crate::overlay::launcher::Entry,
+) {
+    use config::keyassignment::KeyAssignment;
+
+    if let KeyAssignment::SpawnCommandInNewTab(spawn) = &entry.action {
+        if spawn.elevate {
+            return;
+        }
+    }
+
+    // 回调运行在 overlay 工作线程;必须用 spawn_into_main_thread,
+    // spawn() 是 spawn_local 语义,跨线程 poll 会触发 async-task 断言
+    promise::spawn::spawn_into_main_thread(async move {
+        let mux = Mux::get();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            let new_tab_ready = mux
+                .window_containing_tab(starter_tab_id)
+                .and_then(|window_id| mux.get_window(window_id))
+                .map(|window| {
+                    window
+                        .iter()
+                        .any(|tab| tab.tab_id() != starter_tab_id)
+                })
+                .unwrap_or(false);
+            if new_tab_ready {
+                mux.remove_tab(starter_tab_id);
+                return;
+            }
+            if std::time::Instant::now() > deadline {
+                log::warn!(
+                    "close_starter_tab_after_launch: no new tab in 5s, keep starter tab"
+                );
+                return;
+            }
+            smol::Timer::after(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .detach();
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -159,6 +245,14 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
+    /// SFTP 窗口列表整体区域(空白点击/滚轮)
+    SftpSidebar,
+    /// SFTP 窗口条目行;usize = entries 索引
+    SftpEntry(usize),
+    /// SFTP 窗口「上级目录」按钮
+    SftpParentDir,
+    /// SFTP 窗口「刷新」按钮
+    SftpRefresh,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -380,7 +474,7 @@ pub struct TermWindow {
     os_parameters: Option<parameters::Parameters>,
     /// When we most recently received keyboard focus
     pub focused: Option<Instant>,
-    fonts: Rc<FontConfiguration>,
+    pub(crate) fonts: Rc<FontConfiguration>,
     /// Window dimensions and dpi
     pub dimensions: Dimensions,
     pub window_state: WindowState,
@@ -395,7 +489,7 @@ pub struct TermWindow {
     /// This is done asynchronously to avoid races between mux events.
     mux_subscription_dead: Arc<AtomicBool>,
     pub render_metrics: RenderMetrics,
-    render_state: Option<RenderState>,
+    pub(crate) render_state: Option<RenderState>,
     input_map: InputMap,
     /// If is_some, the LEADER modifier is active until the specified instant.
     leader_is_down: Option<std::time::Instant>,
@@ -416,7 +510,7 @@ pub struct TermWindow {
     is_click_to_focus_window: bool,
     last_mouse_coords: (usize, i64),
     window_drag_position: Option<MouseEvent>,
-    current_mouse_event: Option<MouseEvent>,
+    pub(crate) current_mouse_event: Option<MouseEvent>,
     prev_cursor: PrevCursorPos,
     last_scroll_info: RenderableDimensions,
 
@@ -433,7 +527,7 @@ pub struct TermWindow {
     opengl_info: Option<String>,
 
     /// Keeps track of double and triple clicks
-    last_mouse_click: Option<LastMouseClick>,
+    pub(crate) last_mouse_click: Option<LastMouseClick>,
 
     /// The URL over which we are currently hovering
     current_highlight: Option<Arc<Hyperlink>>,
@@ -455,7 +549,7 @@ pub struct TermWindow {
 
     palette: Option<ColorPalette>,
 
-    ui_items: Vec<UIItem>,
+    pub(crate) ui_items: Vec<UIItem>,
     dragging: Option<(UIItem, MouseEvent)>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
@@ -477,7 +571,7 @@ pub struct TermWindow {
 
     connection_name: String,
 
-    gl: Option<Rc<glium::backend::Context>>,
+    pub(crate) gl: Option<Rc<glium::backend::Context>>,
     webgpu: Option<Rc<WebGpuState>>,
     config_subscription: Option<config::ConfigSubscription>,
 }
@@ -570,7 +664,7 @@ impl TermWindow {
         self.emit_window_event("window-focus-changed", None);
     }
 
-    fn created(&mut self, ctx: RenderContext) -> anyhow::Result<()> {
+    pub(crate) fn created(&mut self, ctx: RenderContext) -> anyhow::Result<()> {
         self.render_state = None;
 
         let render_info = ctx.renderer_info();
@@ -599,6 +693,145 @@ impl TermWindow {
 }
 
 impl TermWindow {
+    /// SFTP 独立窗口的渲染宿主构造:与 new_window 的区别 =
+    /// 不挂 mux 窗口、无 tab bar、无背景图,后续由 sftp_window.rs
+    /// 自行 new_window 创建 OS 窗口并 created() 装 GL。
+    pub async fn new_sftp_host() -> anyhow::Result<Self> {
+        let config = configuration();
+        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
+        let fontconfig = Rc::new(FontConfiguration::new(Some(config.clone()), dpi)?);
+        let render_metrics = RenderMetrics::new(&fontconfig)?;
+
+        let terminal_size = TerminalSize {
+            rows: 0,
+            cols: 0,
+            pixel_width: SFTP_WINDOW_WIDTH as usize,
+            pixel_height: SFTP_WINDOW_HEIGHT as usize,
+            dpi: dpi as u32,
+        };
+        let dimensions = Dimensions {
+            pixel_width: SFTP_WINDOW_WIDTH as usize,
+            pixel_height: SFTP_WINDOW_HEIGHT as usize,
+            dpi,
+        };
+        let connection_name = Connection::get().unwrap().name();
+
+        Ok(Self {
+            created: Instant::now(),
+            connection_name,
+            last_fps_check_time: Instant::now(),
+            num_frames: 0,
+            last_frame_duration: Duration::ZERO,
+            fps: 0.,
+            config_subscription: None,
+            os_parameters: None,
+            gl: None,
+            webgpu: None,
+            window: None,
+            window_background: vec![],
+            config: config.clone(),
+            config_overrides: wezterm_dynamic::Value::default(),
+            palette: None,
+            focused: None,
+            mux_window_id: 0,
+            mux_window_id_for_subscriptions: Arc::new(Mutex::new(0)),
+            mux_subscription_dead: Arc::new(AtomicBool::new(true)),
+            fonts: Rc::clone(&fontconfig),
+            render_metrics,
+            dimensions,
+            window_state: WindowState::default(),
+            resizes_pending: 0,
+            is_repaint_pending: false,
+            pending_scale_changes: LinkedList::new(),
+            terminal_size,
+            render_state: None,
+            input_map: InputMap::new(&config),
+            leader_is_down: None,
+            dead_key_status: DeadKeyStatus::None,
+            show_tab_bar: false,
+            show_scroll_bar: false,
+            tab_bar: TabBarState::default(),
+            fancy_tab_bar: None,
+            right_status: String::new(),
+            left_status: String::new(),
+            last_mouse_coords: (0, -1),
+            window_drag_position: None,
+            current_mouse_event: None,
+            current_modifier_and_leds: Default::default(),
+            prev_cursor: PrevCursorPos::new(),
+            last_scroll_info: RenderableDimensions::default(),
+            tab_state: RefCell::new(HashMap::new()),
+            pane_state: RefCell::new(HashMap::new()),
+            current_mouse_buttons: vec![],
+            current_mouse_capture: None,
+            last_mouse_click: None,
+            current_highlight: None,
+            quad_generation: 0,
+            shape_generation: 0,
+            shape_cache: RefCell::new(LfuCache::new(
+                "shape_cache.hit.rate",
+                "shape_cache.miss.rate",
+                |config| config.shape_cache_size,
+                &config,
+            )),
+            line_state_cache: RefCell::new(LfuCacheU64::new(
+                "line_state_cache.hit.rate",
+                "line_state_cache.miss.rate",
+                |config| config.line_state_cache_size,
+                &config,
+            )),
+            next_line_state_id: 0,
+            line_quad_cache: RefCell::new(LfuCache::new(
+                "line_quad_cache.hit.rate",
+                "line_quad_cache.miss.rate",
+                |config| config.line_quad_cache_size,
+                &config,
+            )),
+            line_to_ele_shape_cache: RefCell::new(LfuCache::new(
+                "line_to_ele_shape_cache.hit.rate",
+                "line_to_ele_shape_cache.miss.rate",
+                |config| config.line_to_ele_shape_cache_size,
+                &config,
+            )),
+            last_status_call: Instant::now(),
+            cursor_blink_state: RefCell::new(ColorEase::new(
+                config.cursor_blink_rate,
+                config.cursor_blink_ease_in,
+                config.cursor_blink_rate,
+                config.cursor_blink_ease_out,
+                None,
+            )),
+            blink_state: RefCell::new(ColorEase::new(
+                config.text_blink_rate,
+                config.text_blink_ease_in,
+                config.text_blink_rate,
+                config.text_blink_ease_out,
+                None,
+            )),
+            rapid_blink_state: RefCell::new(ColorEase::new(
+                config.text_blink_rate_rapid,
+                config.text_blink_rapid_ease_in,
+                config.text_blink_rate_rapid,
+                config.text_blink_rapid_ease_out,
+                None,
+            )),
+            event_states: HashMap::new(),
+            current_event: None,
+            has_animation: RefCell::new(None),
+            scheduled_animation: RefCell::new(None),
+            allow_images: AllowImage::Yes,
+            semantic_zones: HashMap::new(),
+            ui_items: vec![],
+            dragging: None,
+            last_ui_item: None,
+            copy_button_feedback: None,
+            is_click_to_focus_window: false,
+            key_table_state: KeyTableState::default(),
+            modal: RefCell::new(None),
+            opengl_info: None,
+        })
+    }
+
     pub async fn new_window(mux_window_id: MuxWindowId) -> anyhow::Result<()> {
         let config = configuration();
         let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
@@ -1267,7 +1500,7 @@ impl TermWindow {
                 }
                 MuxNotification::Alert {
                     alert: Alert::ToastNotification { .. },
-                    ..
+                    pane_id: _,
                 } => {}
                 MuxNotification::TabAddedToWindow {
                     window_id: _,
@@ -1412,7 +1645,7 @@ impl TermWindow {
         self.tab_state.borrow_mut().clear();
     }
 
-    fn apply_icon(window: &Window) -> anyhow::Result<()> {
+    pub(crate) fn apply_icon(window: &Window) -> anyhow::Result<()> {
         let image = image::load_from_memory(ICON_DATA)?.into_rgba8();
         let (width, height) = image.dimensions();
         window.set_icon(Image::with_rgba32(
@@ -1730,7 +1963,7 @@ impl TermWindow {
 }
 
 impl TermWindow {
-    fn palette(&mut self) -> &ColorPalette {
+    pub(crate) fn palette(&mut self) -> &ColorPalette {
         if self.palette.is_none() {
             self.palette
                 .replace(config::TermConfig::new().color_palette());
@@ -2025,6 +2258,7 @@ impl TermWindow {
             &self.right_status,
             self.copy_button_feedback
                 .map_or(false, |t| t.elapsed() < Duration::from_millis(1500)),
+            self.active_pane_is_ssh(),
         );
         if new_tab_bar != self.tab_bar {
             self.tab_bar = new_tab_bar;
@@ -2424,6 +2658,67 @@ impl TermWindow {
         self.show_launcher_impl(args, 0);
     }
 
+    /// 启动菜单弹出(show_launcher 的启动变体,由 startup_launcher_flow
+    /// 在 TermWindow 就绪后经 TermWindowNotif::Apply 调入):对启动时
+    /// 正常 spawn 的真实 tab 挂 launcher overlay。
+    fn show_launcher_on_starter_tab(&mut self, starter_tab_id: mux::tab::TabId) {
+        let mux = Mux::get();
+        let Some(tab) = mux.get_tab(starter_tab_id) else {
+            return;
+        };
+        let Some(pane) = tab.get_active_pane() else {
+            return;
+        };
+        let mux_window_id = self.mux_window_id;
+        let tab_id = tab.tab_id();
+        let pane_id = pane.pane_id();
+        let domain_id = pane.domain_id();
+        let title = "Launcher".to_string();
+        // 只展示启动菜单项(与右键 + 号的 ShowLauncherArgs 一致);
+        // Domains/Workspaces 等入口在真实 shell tab 上下文中用
+        // 右键 + 号菜单即可,启动场景保持精简
+        let flags = LauncherFlags::LAUNCH_MENU_ITEMS;
+        let help_text =
+            "Select an item and press Enter=launch  Esc=cancel  /=filter".to_string();
+        let fuzzy_help_text = "Fuzzy matching: ".to_string();
+        let alphabet = self.config.launcher_alphabet.clone();
+        let window = self.window.as_ref().unwrap().clone();
+
+        promise::spawn::spawn(async move {
+            let args = LauncherArgs::new(
+                &title,
+                flags,
+                mux_window_id,
+                pane_id,
+                domain_id,
+                &help_text,
+                &fuzzy_help_text,
+                &alphabet,
+            )
+            .await;
+
+            let win = window.clone();
+            win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+                let mux = Mux::get();
+                if let Some(tab) = mux.get_tab(tab_id) {
+                    let window = window.clone();
+                    // 选中菜单项后:新 tab 加入窗口时自动关闭这个初始 shell 标签,
+                    // 避免启动菜单选中后残留一个多余的初始 tab(Esc 取消则保留它作为兜底)
+                    let on_launch = Box::new(move |entry: &crate::overlay::launcher::Entry| {
+                        close_starter_tab_after_launch(starter_tab_id, entry);
+                    });
+                    let (overlay, future) =
+                        start_overlay(term_window, &tab, move |_tab_id, term| {
+                            launcher(args, term, window, 0, Some(on_launch))
+                        });
+                    term_window.assign_overlay(tab.tab_id(), overlay);
+                    promise::spawn::spawn(future).detach();
+                }
+            })));
+        })
+        .detach();
+    }
+
     fn show_launcher_impl(&mut self, args: LauncherActionArgs, initial_choice_idx: usize) {
         let mux_window_id = self.mux_window_id;
         let window = self.window.as_ref().unwrap().clone();
@@ -2479,7 +2774,7 @@ impl TermWindow {
                     let window = window.clone();
                     let (overlay, future) =
                         start_overlay(term_window, &tab, move |_tab_id, term| {
-                            launcher(args, term, window, initial_choice_idx)
+                            launcher(args, term, window, initial_choice_idx, None)
                         });
 
                     term_window.assign_overlay(tab_id, overlay);
@@ -2815,6 +3110,7 @@ impl TermWindow {
             ShowTabNavigator => self.show_tab_navigator(),
             ShowDebugOverlay => self.show_debug_overlay(),
             ShowLauncher => self.show_launcher(),
+            ToggleSftpPanel => crate::sftp_window::open_for_active_pane(self),
             ShowLauncherArgs(args) => {
                 let title = args.title.clone().unwrap_or("Launcher".to_string());
                 let args = LauncherActionArgs {
@@ -3454,6 +3750,18 @@ impl TermWindow {
                 .map(|overlay| overlay.pane.clone())
                 .or_else(|| Some(pane))
         }
+    }
+
+    /// 当前活动 pane 是否为直连 SSH(SftpPanelButton 灰化判断:
+    /// 非 SSH 标签时按钮灰色且点击无效)
+    pub fn active_pane_is_ssh(&self) -> bool {
+        let Some(pane) = self.get_active_pane_or_overlay() else {
+            return false;
+        };
+        let mux = Mux::get();
+        mux.get_domain(pane.domain_id())
+            .map(|domain| domain.downcast_ref::<mux::ssh::RemoteSshDomain>().is_some())
+            .unwrap_or(false)
     }
 
     fn get_splits(&mut self) -> Vec<PositionedSplit> {

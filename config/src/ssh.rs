@@ -5,7 +5,7 @@ use std::fmt::Display;
 use std::str::FromStr;
 use wezterm_dynamic::{FromDynamic, ToDynamic};
 
-#[derive(Debug, Clone, Copy, FromDynamic, ToDynamic)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
 pub enum SshBackend {
     Ssh2,
     LibSsh,
@@ -47,7 +47,7 @@ impl Default for Shell {
     }
 }
 
-#[derive(Default, Debug, Clone, FromDynamic, ToDynamic)]
+#[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
 pub struct SshDomain {
     /// The name of this specific domain.  Must be unique amongst
     /// all types of domain in the configuration file.

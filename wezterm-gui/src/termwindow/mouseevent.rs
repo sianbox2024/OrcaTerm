@@ -7,7 +7,7 @@ use ::window::{
     WindowDecorations, WindowOps, WindowState,
 };
 use config::keyassignment::{
-    ClipboardCopyDestination, KeyAssignment, MouseEventTrigger, SpawnTabDomain,
+    ClipboardCopyDestination, KeyAssignment, MouseEventTrigger,
 };
 use config::MouseEventAltScreen;
 use mux::pane::{Pane, WithPaneLines};
@@ -45,7 +45,12 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            // SFTP 窗口的项只出现在其自身 ui_items;主窗口不会命中
+            | UIItemType::SftpSidebar
+            | UIItemType::SftpEntry(_)
+            | UIItemType::SftpParentDir
+            | UIItemType::SftpRefresh => {}
         }
     }
 
@@ -56,7 +61,11 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_) => {}
+            | UIItemType::Split(_)
+            | UIItemType::SftpSidebar
+            | UIItemType::SftpEntry(_)
+            | UIItemType::SftpParentDir
+            | UIItemType::SftpRefresh => {}
         }
     }
 
@@ -384,6 +393,11 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
+            // SFTP 窗口的项只出现在其自身 ui_items;主窗口不会命中
+            UIItemType::SftpSidebar
+            | UIItemType::SftpEntry(_)
+            | UIItemType::SftpParentDir
+            | UIItemType::SftpRefresh => {}
         }
     }
 
@@ -409,9 +423,11 @@ impl super::TermWindow {
             None => return,
         };
         let action = match button {
-            MousePress::Left => Some(KeyAssignment::SpawnTab(SpawnTabDomain::CurrentPaneDomain)),
-            // 右键 "+"：仅列出 launch_menu（CMD/PowerShell/SSH 连接），不带内置命令
-            MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(
+            // 左键/右键 "+" 都弹出 launch_menu(CMD/PowerShell/SSH 连接)。
+            // 此前左键是 SpawnTab(CurrentPaneDomain)(当前域新 tab,同 Windows
+            // Terminal 惯例),但活动 tab 是 SSH 时点 "+" 会"无感直连 SSH",
+            // 用户困惑且易误连;统一走菜单,新开什么由用户显式选择。
+            MousePress::Left | MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(
                 config::keyassignment::LauncherActionArgs {
                     flags: config::keyassignment::LauncherFlags::LAUNCH_MENU_ITEMS,
                     ..Default::default()
@@ -544,6 +560,13 @@ impl super::TermWindow {
                         .detach();
                     }
                 }
+                TabBarItem::SftpPanelButton => {
+                    // 非 SSH 标签:按钮灰色不可用,点击忽略
+                    // (与 CTRL+SHIFT+F / 命令面板同一入口)
+                    if self.active_pane_is_ssh() {
+                        crate::sftp_window::open_for_active_pane(self);
+                    }
+                }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
                     let maximized = self
                         .window_state
@@ -599,7 +622,8 @@ impl super::TermWindow {
                 | TabBarItem::RightStatus
                 | TabBarItem::WindowButton(_)
                 | TabBarItem::ConfigUIButton
-                | TabBarItem::CopyScreenButton => {}
+                | TabBarItem::CopyScreenButton
+                | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Press(MousePress::Right) => match item {
                 TabBarItem::Tab { .. } => {
@@ -613,7 +637,8 @@ impl super::TermWindow {
                 | TabBarItem::RightStatus
                 | TabBarItem::WindowButton(_)
                 | TabBarItem::ConfigUIButton
-                | TabBarItem::CopyScreenButton => {}
+                | TabBarItem::CopyScreenButton
+                | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Move => match item {
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
@@ -633,7 +658,8 @@ impl super::TermWindow {
                 | TabBarItem::Tab { .. }
                 | TabBarItem::NewTabButton { .. }
                 | TabBarItem::ConfigUIButton
-                | TabBarItem::CopyScreenButton => {}
+                | TabBarItem::CopyScreenButton
+                | TabBarItem::SftpPanelButton => {}
             },
             WMEK::VertWheel(n) => {
                 if self.config.mouse_wheel_scrolls_tabs {

@@ -1638,6 +1638,14 @@ pub fn derive_command_from_key_assignment(action: &KeyAssignment) -> Option<Comm
             menubar: &["Shell"],
             icon: None,
         },
+        ToggleSftpPanel => CommandDef {
+            brief: "Toggle SFTP file browser".into(),
+            doc: "Toggles the SFTP file browser sidebar for the current SSH connection".into(),
+            keys: vec![(Modifiers::CTRL | Modifiers::SHIFT, "F".into())],
+            args: &[ArgType::ActiveWindow],
+            menubar: &["View"],
+            icon: Some("md_folder_open"),
+        },
         ShowTabNavigator => CommandDef {
             brief: "Navigate tabs".into(),
             doc: "Shows the tab navigator".into(),
@@ -2144,6 +2152,7 @@ fn compute_default_actions() -> Vec<KeyAssignment> {
         ActivateLastTab,
         ShowLauncher,
         ShowTabNavigator,
+        ToggleSftpPanel,
         // ----------------- Help
         OpenUri("https://wezterm.org/".to_string()),
         OpenUri("https://github.com/wezterm/wezterm/discussions/".to_string()),

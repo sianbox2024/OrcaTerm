@@ -15,10 +15,12 @@ use wezterm_term::{Line, Progress};
 use window::{IntegratedTitleButton, IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 
 /// 三个标签栏按钮（+/齿轮/复制）图标的默认蓝色、hover 蓝与复制成功反馈绿，
+/// 以及 SFTP 按钮不可用（非 SSH 标签）时的灰色，
 /// 与 fancy 标签栏（fancy_tab_bar.rs 的 button_colors）保持一致
 pub const BUTTON_ICON_BLUE: (u8, u8, u8) = (0x2f, 0x81, 0xf7);
 pub const BUTTON_ICON_BLUE_HOVER: (u8, u8, u8) = (0x5a, 0x9d, 0xf9);
 pub const BUTTON_ICON_GREEN: (u8, u8, u8) = (0x3f, 0xb9, 0x50);
+pub const BUTTON_ICON_DIM: (u8, u8, u8) = (0x5d, 0x66, 0x73);
 
 /// 按钮 icon cell 的属性：指定前景色 + 标签栏背景色
 fn button_icon_attrs(fg: (u8, u8, u8), bg: config::RgbaColor) -> CellAttributes {
@@ -47,6 +49,7 @@ pub enum TabBarItem {
     NewTabButton,
     ConfigUIButton,
     CopyScreenButton,
+    SftpPanelButton,
     WindowButton(IntegratedTitleButton),
 }
 
@@ -446,6 +449,7 @@ impl TabBarState {
         left_status: &str,
         right_status: &str,
         copy_button_feedback: bool,
+        sftp_enabled: bool,
     ) -> Self {
         let colors = colors.cloned().unwrap_or_else(TabBarColors::default);
 
@@ -697,6 +701,43 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::CopyScreenButton,
                 title: copy_button.clone(),
+                x: button_start,
+                width,
+            });
+            x += width;
+        }
+
+        // SFTP panel button
+        {
+            // iconfont SFTP 字形（U+E713）。SSH 标签:蓝色 + hover 提亮
+            // (与齿轮/复制同风格);非 SSH 标签:灰色不可用,点击无效。
+            let sftp = "\u{e713}";
+            let sftp_fg = if sftp_enabled {
+                BUTTON_ICON_BLUE
+            } else {
+                BUTTON_ICON_DIM
+            };
+            let sftp_hover_fg = if sftp_enabled {
+                BUTTON_ICON_BLUE_HOVER
+            } else {
+                BUTTON_ICON_DIM
+            };
+            let sftp_line = parse_status_text(
+                sftp,
+                button_icon_attrs(sftp_fg, colors.background()),
+            );
+            let sftp_hover_line = parse_status_text(
+                sftp,
+                button_icon_attrs(sftp_hover_fg, colors.background()),
+            );
+            let hover = is_tab_hover(mouse_x, x, sftp_line.len());
+            let sftp_button = if hover { &sftp_hover_line } else { &sftp_line };
+            let button_start = x;
+            let width = sftp_button.len();
+            line.append_line(sftp_button.clone(), SEQ_ZERO);
+            items.push(TabEntry {
+                item: TabBarItem::SftpPanelButton,
+                title: sftp_button.clone(),
                 x: button_start,
                 width,
             });

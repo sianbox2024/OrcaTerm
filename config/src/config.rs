@@ -480,6 +480,12 @@ pub struct Config {
     #[dynamic(default = "default_true")]
     pub use_fancy_tab_bar: bool,
 
+    /// 启动时零标签:GUI 启动不自动开默认 shell 标签,而是直接弹出
+    /// 启动菜单(右键标签栏 + 号的 launcher),选中后创建对应标签;
+    /// 菜单按 Esc 关闭时保留空窗口(点 + 号可再次弹出)。
+    #[dynamic(default = "default_true")]
+    pub show_launcher_on_startup: bool,
+
     #[dynamic(default)]
     pub tab_bar_at_bottom: bool,
 

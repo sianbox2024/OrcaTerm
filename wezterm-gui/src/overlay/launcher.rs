@@ -30,7 +30,7 @@ use window::WindowOps;
 pub use config::keyassignment::LauncherFlags;
 
 #[derive(Clone)]
-struct Entry {
+pub struct Entry {
     pub label: String,
     pub action: KeyAssignment,
 }
@@ -187,6 +187,9 @@ struct LauncherState {
     alphabet: String,
     selection: String,
     always_fuzzy: bool,
+    /// 选中条目派发后的一次性回调（启动菜单场景用于
+    /// 在新 tab 就绪后关闭初始 shell 标签；普通菜单传 None）
+    on_launch: Option<Box<dyn FnOnce(&Entry) + Send>>,
 }
 
 impl LauncherState {
@@ -474,9 +477,12 @@ impl LauncherState {
         term.render(&changes)
     }
 
-    fn launch(&self, active_idx: usize) -> bool {
+    fn launch(&mut self, active_idx: usize) -> bool {
         if let Some(entry) = self.filtered_entries.get(active_idx) {
             let assignment = entry.action.clone();
+            if let Some(on_launch) = self.on_launch.take() {
+                on_launch(entry);
+            }
             self.window.notify(TermWindowNotif::PerformAssignment {
                 pane_id: self.pane_id,
                 assignment,
@@ -649,6 +655,7 @@ pub fn launcher(
     mut term: TermWizTerminal,
     window: ::window::Window,
     initial_choice_idx: usize,
+    on_launch: Option<Box<dyn FnOnce(&Entry) + Send>>,
 ) -> anyhow::Result<()> {
     let filtering = args.flags.contains(LauncherFlags::FUZZY);
     let mut state = LauncherState {
@@ -667,6 +674,7 @@ pub fn launcher(
         selection: String::new(),
         alphabet: args.alphabet.clone(),
         always_fuzzy: filtering,
+        on_launch,
     };
 
     term.set_raw_mode()?;

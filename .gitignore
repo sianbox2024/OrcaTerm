@@ -1,6 +1,7 @@
 /portable/
 /Issue/
 /.tag
+.zcode/
 .DS_Store
 dhat-heap.json
 /docs/

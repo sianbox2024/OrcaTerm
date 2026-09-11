@@ -45,6 +45,9 @@ mod overlay;
 mod quad;
 mod renderstate;
 mod resize_increment_calculator;
+#[cfg(windows)]
+mod sftp_dragout;
+mod sftp_window;
 mod scripting;
 mod scrollbar;
 mod selection;
@@ -295,6 +298,50 @@ async fn spawn_tab_in_domain_if_mux_is_empty(
         if have_panes_in_domain_and_ws(&domain, &workspace) {
             return Ok(());
         }
+    }
+
+    let config = config::configuration();
+
+    // 启动菜单模式:正常 spawn 默认 shell 标签(保证 mux 的 workspace
+    // pane 计数非零,避免 reconcile_workspace 判空后把唯一 OS 窗口关掉
+    // —— 零标签"菜单宿主 tab"旧实现因此闪退,已废弃)。窗口就绪后
+    // 由 startup_launcher_flow 在该真实 tab 的 overlay 上自动弹出
+    // 启动菜单(与右键 + 号同款 LAUNCH_MENU_ITEMS);选中菜单项即开
+    // 新标签,Esc 关闭菜单 = 保留当前 shell 标签。
+    if !is_connecting
+        && cmd.is_none()
+        && domain.domain_id() == mux.default_domain().domain_id()
+        && config.show_launcher_on_startup
+    {
+        let window_id = {
+            let builder = mux.new_empty_window(workspace.clone(), None);
+            *builder
+        };
+        config.update_ulimit()?;
+        domain.attach(Some(window_id)).await?;
+
+        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi());
+        let size = config.initial_size(dpi as u32, Some(cell_pixel_dims(&config, dpi)?));
+        let tab = domain.spawn(size, cmd, None, window_id).await?;
+        trigger_and_log_gui_attached(MuxDomain(domain.domain_id())).await;
+
+        let _config_subscription = config::subscribe_to_config_reload(move || {
+            promise::spawn::spawn_into_main_thread(async move {
+                if let Err(err) = update_mux_domains(&config::configuration()) {
+                    log::error!("Error updating mux domains: {:#}", err);
+                }
+            })
+            .detach();
+            true
+        });
+        // 窗口(TermWindow)由 frontend 在 WindowCreated 后创建;
+        // 菜单弹窗延后到首帧就绪,在 TermWindow 侧的
+        // launcher 流程处理(见 termwindow/mod.rs)
+        promise::spawn::spawn(async move {
+            crate::termwindow::startup_launcher_flow(window_id, tab).await;
+        })
+        .detach();
+        return Ok(());
     }
 
     let window_id = {
@@ -1178,6 +1225,11 @@ fn run() -> anyhow::Result<()> {
                 ::windows::core::PCWSTR(wide_string("io.orcaterm.gui").as_ptr()),
             )
             .unwrap();
+        }
+        // SFTP 侧栏拖出(OLE DoDragDrop)需要 STA OLE。
+        // 失败可容忍:拖出功能届时不可用,其余功能不受影响。
+        unsafe {
+            winapi::um::ole2::OleInitialize(std::ptr::null_mut());
         }
     }
 

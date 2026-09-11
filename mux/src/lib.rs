@@ -755,6 +755,33 @@ impl Mux {
             .insert(domain.domain_name().to_string(), Arc::clone(domain));
     }
 
+    /// 从 mux 移除一个域(按 id 与名称双表摘除)。
+    /// 调用方须保证该域没有活动 pane,否则 pane 会失去归属。
+    pub fn remove_domain(&self, domain: &Arc<dyn Domain>) {
+        let domain_id = domain.domain_id();
+        let domain_name = domain.domain_name().to_string();
+        self.domains.write().remove(&domain_id);
+        // 按名称摘除前校验同一名称仍指向该域(避免误删重命名后的新域)。
+        // 注意:校验与摘除必须分两步——if let 里 read 守卫会存活到块结束,
+        // 同线程再拿 write 会死锁。
+        let same = self
+            .domains_by_name
+            .read()
+            .get(&domain_name)
+            .map(|d| d.domain_id() == domain_id)
+            .unwrap_or(false);
+        if same {
+            self.domains_by_name.write().remove(&domain_name);
+        }
+    }
+
+    /// 该域是否还有活动 pane(用于热重载替换域前的安全检查)
+    pub fn domain_has_active_panes(&self, domain_id: DomainId) -> bool {
+        self.iter_panes()
+            .iter()
+            .any(|pane| pane.domain_id() == domain_id)
+    }
+
     pub fn set_mux(mux: &Arc<Mux>) {
         MUX.lock().replace(Arc::clone(mux));
     }

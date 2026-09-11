@@ -579,8 +579,13 @@ impl ConfigUi {
             }
             body.push_str(&ssh::emit_ssh_domains(&self.ssh_conns));
         }
-        // 启动菜单（右键"+"弹出）：由 SSH 连接列表派生，保存时始终重写保持同步
-        body.push_str(&ssh::emit_launch_menu(&self.ssh_conns));
+        // 启动菜单（"+"左右键弹出）：由 SSH 连接列表派生，保存时始终重写保持同步；
+        // 传当前表单的 default_prog 作为 pwsh 探测的最终证据（绿色版 pwsh 不在
+        // PATH/ProgramFiles 里，见 config-ui-core ssh::resolve_pwsh）
+        body.push_str(&ssh::emit_launch_menu(
+            &self.ssh_conns,
+            self.form.default_prog.as_deref(),
+        ));
         let text = format!(
             "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n\n{body}return config\n"
         );

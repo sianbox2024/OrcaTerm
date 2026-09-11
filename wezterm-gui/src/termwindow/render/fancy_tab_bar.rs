@@ -17,10 +17,12 @@ use window::{IntegratedTitleButtonAlignment, IntegratedTitleButtonStyle};
 pub mod iconfont_glyph {
     pub const SETTINGS: char = '\u{e607}';
     pub const COPY: char = '\u{e65f}';
+    pub const SFTP: char = '\u{e713}';
 }
 
-/// 三个标签栏按钮（+/齿轮/复制）的图标默认蓝色；
+/// 标签栏按钮（+/齿轮/复制/SFTP）的图标默认蓝色；
 /// hover 时稍微提亮。复制成功反馈期图标转绿色。
+/// SFTP 按钮在非 SSH 标签下灰色不可用。
 /// sRGB 值，构造时需经 to_linear() 转换。
 mod button_colors {
     use ::window::color::LinearRgba;
@@ -28,6 +30,7 @@ mod button_colors {
     pub const ICON_BLUE: [u8; 3] = [0x2f, 0x81, 0xf7];
     pub const ICON_BLUE_HOVER: [u8; 3] = [0x5a, 0x9d, 0xf9];
     pub const ICON_GREEN: [u8; 3] = [0x3f, 0xb9, 0x50];
+    pub const ICON_DIM: [u8; 3] = [0x5d, 0x66, 0x73];
 
     fn linear(rgb: [u8; 3]) -> LinearRgba {
         LinearRgba::with_srgba(rgb[0], rgb[1], rgb[2], 0xff)
@@ -43,6 +46,10 @@ mod button_colors {
 
     pub fn icon_green() -> LinearRgba {
         linear(ICON_GREEN)
+    }
+
+    pub fn icon_dim() -> LinearRgba {
+        linear(ICON_DIM)
     }
 }
 
@@ -416,6 +423,52 @@ impl crate::TermWindow {
                         .into(),
                     }))
                 }
+                TabBarItem::SftpPanelButton => {
+                    let new_tab = colors.new_tab();
+                    let new_tab_hover = colors.new_tab_hover();
+                    // iconfont SFTP 字形（U+E713）。SSH 标签:蓝色 + hover
+                    // 提亮(与齿轮/复制同风格);非 SSH 标签:灰色不可用
+                    let sftp_enabled = self.active_pane_is_ssh();
+                    Element::new(
+                        &icon_font,
+                        ElementContent::Text(iconfont_glyph::SFTP.to_string()),
+                    )
+                    .vertical_align(VerticalAlign::Middle)
+                    .item_type(UIItemType::TabBar(item.item.clone()))
+                    .margin(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.),
+                    })
+                    .padding(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.5),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.25),
+                    })
+                    .border(BoxDimension::new(Dimension::Pixels(1.)))
+                    .colors(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab.bg_color.to_linear().into(),
+                        text: if sftp_enabled {
+                            button_colors::icon_blue()
+                        } else {
+                            button_colors::icon_dim()
+                        }
+                        .into(),
+                    })
+                    .hover_colors(Some(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab_hover.bg_color.to_linear().into(),
+                        text: if sftp_enabled {
+                            button_colors::icon_blue_hover()
+                        } else {
+                            button_colors::icon_dim()
+                        }
+                        .into(),
+                    }))
+                }
             }
         };
 
@@ -425,6 +478,7 @@ impl crate::TermWindow {
                 TabBarItem::NewTabButton
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
+                | TabBarItem::SftpPanelButton
                 | TabBarItem::Tab { .. } => 1.,
                 _ => 0.,
             })

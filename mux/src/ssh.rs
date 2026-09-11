@@ -244,6 +244,18 @@ impl RemoteSshDomain {
         ssh_domain_to_ssh_config(&self.dom)
     }
 
+    /// 创建域时克隆的配置快照(热重载时用于比较新旧配置是否变化)
+    pub fn ssh_domain_config(&self) -> &SshDomain {
+        &self.dom
+    }
+
+    /// Returns a clone of the authenticated session, if one has been
+    /// established. The session handle is cheap to clone; the underlying
+    /// ssh transport runs on its own dedicated thread.
+    pub fn session(&self) -> Option<Session> {
+        self.session.lock().unwrap().as_ref().cloned()
+    }
+
     fn build_command(
         &self,
         pane_id: PaneId,

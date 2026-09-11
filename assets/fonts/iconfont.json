@@ -6,6 +6,13 @@
   "description": "",
   "glyphs": [
     {
+      "icon_id": "36428450",
+      "name": "SFTP",
+      "font_class": "SFTP",
+      "unicode": "e713",
+      "unicode_decimal": 59155
+    },
+    {
       "icon_id": "25964417",
       "name": "复制",
       "font_class": "fuzhi",

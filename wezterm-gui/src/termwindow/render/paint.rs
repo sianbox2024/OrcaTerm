@@ -272,9 +272,14 @@ impl crate::TermWindow {
             self.paint_tab_bar(&mut layers).context("paint_tab_bar")?;
         }
 
-        self.paint_window_borders(&mut layers)
-            .context("paint_window_borders")?;
         drop(layers);
+
+        {
+            // 复用开头的 layer Rc,不再借用 gl_state
+            let mut layers = layer.quad_allocator();
+            self.paint_window_borders(&mut layers)
+                .context("paint_window_borders")?;
+        }
         self.paint_modal().context("paint_modal")?;
 
         Ok(())

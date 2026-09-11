@@ -4,44 +4,65 @@
 
 use serde_json::Value;
 
-/// PowerShell 探测结果：pwsh 7 可用时所有「PowerShell」语义的发射项都指向它。
-enum Shell {
-    Pwsh,
-    Fallback,
-}
+/// PowerShell 探测结果:Some(绝对路径)=pwsh 7 可用,所有「PowerShell」语义的
+/// 发射项都指向它;None=回退 powershell.exe(PS 5.1,系统自带,裸名安全)。
 
-/// 探测本机 PowerShell：pwsh 7（PATH 或 %ProgramFiles%/PowerShell/7）优先，无则回退
-/// powershell.exe（PS 5.1）。与主程序 config::default_default_prog / windows_has_pwsh
-/// 策略一致；GUI 保存重写整个配置文件，菜单项必须与主程序默认 shell 的选择逻辑同步，
-/// 否则一次保存就会把默认 shell 降级为 PS 5.1。
-fn default_shell() -> Shell {
+/// 解析 pwsh 7 安装位,返回绝对路径。绿色版 pwsh(无 MSI/Store 注册痕迹,如
+/// D:\Tools\PowerShell\7)在 PATH 与 %ProgramFiles% 里都找不到,因此除常规
+/// 位置外还接受调用方传入的 default_prog 作最终证据——配置里的默认程序
+/// 指向 pwsh.exe(任意路径)即说明用户在用 pwsh 7,且该路径就是其安装位。
+/// 返回绝对路径而非裸名:裸名 `pwsh.exe` 依赖 PATH,而保存后的菜单会在
+/// 提权/最小环境等 PATH 不同的上下文里执行(绿色版不在 PATH 时裸名直接
+/// 启动失败,表现为选菜单项即报 didn't exit cleanly)。
+fn resolve_pwsh(default_prog: Option<&[String]>) -> Option<String> {
     #[cfg(windows)]
     {
-        let has_pwsh = || {
-            std::env::var_os("PATH")
-                .map(|paths| {
-                    std::env::split_paths(&paths).any(|dir| dir.join("pwsh.exe").is_file())
-                })
-                .unwrap_or(false)
-                || std::env::var_os("ProgramFiles")
-                    .map(|pf| {
-                        std::path::PathBuf::from(pf)
-                            .join("PowerShell")
-                            .join("7")
-                            .join("pwsh.exe")
-                            .is_file()
-                    })
-                    .unwrap_or(false)
-        };
-        if has_pwsh() {
-            Shell::Pwsh
-        } else {
-            Shell::Fallback
+        let from_path = std::env::var_os("PATH").and_then(|paths| {
+            std::env::split_paths(&paths)
+                .find(|dir| dir.join("pwsh.exe").is_file())
+                .map(|dir| dir.join("pwsh.exe"))
+        });
+        let candidates = [
+            from_path,
+            std::env::var_os("ProgramFiles").map(|pf| {
+                std::path::PathBuf::from(pf)
+                    .join("PowerShell")
+                    .join("7")
+                    .join("pwsh.exe")
+            }),
+            std::env::var_os("LocalAppData").map(|la| {
+                std::path::PathBuf::from(la)
+                    .join("Microsoft")
+                    .join("PowerShell")
+                    .join("pwsh.exe")
+            }),
+            Some(std::path::PathBuf::from(r"D:\Tools\PowerShell\7\pwsh.exe")),
+        ];
+        for c in candidates.into_iter().flatten() {
+            if c.is_file() {
+                return Some(c.to_string_lossy().into_owned());
+            }
         }
+        // 配置快照的 default_prog 兜底:首启模板/用户配置写明 pwsh 完整路径
+        // (无论装在哪个盘)就是最直接的证据,路径本身即安装位。
+        default_prog.and_then(|prog| pwsh_path_from_prog(prog))
     }
     #[cfg(not(windows))]
     {
-        Shell::Fallback
+        let _ = default_prog;
+        None
+    }
+}
+
+/// 文件名判定层(纯函数):default_prog 第一元素文件名为 pwsh(.exe) 时
+/// 返回该路径——绿色版安装唯一的可靠线索。
+fn pwsh_path_from_prog(prog: &[String]) -> Option<String> {
+    let exe = prog.first()?;
+    let file = exe.rsplit(['\\', '/']).next().unwrap_or(exe);
+    if file.eq_ignore_ascii_case("pwsh.exe") || file.eq_ignore_ascii_case("pwsh") {
+        Some(exe.clone())
+    } else {
+        None
     }
 }
 
@@ -196,19 +217,20 @@ pub fn emit_ssh_domains(conns: &[SshConnection]) -> String {
 /// 发射 `config.launch_menu`：四项本地 shell（CMD / PowerShell / 管理员CMD / 管理员PowerShell，
 /// 后两项用 elevate=true 由提权的新 GUI 实例运行，UAC 授权后生效），再为每个 SSH 连接
 /// 生成对应条目。保存时无条件重写，保证菜单与连接列表同步。
-pub fn emit_launch_menu(conns: &[SshConnection]) -> String {
-    // PowerShell 菜单项与默认 shell 保持一致：探测到 pwsh 7 时用 pwsh（含 -NoLogo），
-    // 否则回退 powershell.exe（PS 5.1）。与主程序 config::default_default_prog 的
-    // 策略相同；此前硬编码 powershell.exe，会把保存动作变成「默认 shell 降级为 PS 5.1」。
-    let (ps_label, ps_args, ps_admin_label) = match default_shell() {
-        Shell::Pwsh => (
+/// `default_prog` 为当前配置快照的默认程序（探测 pwsh 的最终证据，见 resolve_pwsh）。
+pub fn emit_launch_menu(conns: &[SshConnection], default_prog: Option<&[String]>) -> String {
+    // PowerShell 菜单项与默认 shell 保持一致：探测到 pwsh 7 时用其绝对路径
+    // （含 -NoLogo），否则回退 powershell.exe（PS 5.1）。必须是绝对路径——
+    // 此前发射裸名 pwsh.exe，绿色版安装（不在 PATH）下选菜单项即启动失败。
+    let (ps_label, ps_args, ps_admin_label) = match resolve_pwsh(default_prog) {
+        Some(pwsh) => (
             "新PowerShell 7窗口",
-            "{'pwsh.exe', '-NoLogo'}",
+            format!("{{{}, '-NoLogo'}}", quote(&pwsh)),
             "新管理员PowerShell 7窗口",
         ),
-        Shell::Fallback => (
+        None => (
             "新PowerShell窗口",
-            "{'powershell.exe'}",
+            "{'powershell.exe'}".to_string(),
             "新管理员PowerShell窗口",
         ),
     };
@@ -391,24 +413,22 @@ mod tests {
             key_path: String::new(),
             initial_command: String::new(),
         }];
-        let lua = emit_launch_menu(&conns);
+        let lua = emit_launch_menu(&conns, None);
         assert!(lua.contains("label='新CMD窗口'"), "{lua}");
-        // PowerShell 项跟随本机探测（pwsh 7 / PS 5.1），但普通项与管理员项必须同源：
-        // 找到普通项后按同一 args 断言管理员项，防止再次出现「普通项 pwsh、管理员项 5.1」的漂移。
-        let ps_args = if lua.contains("args={'pwsh.exe', '-NoLogo'}") {
-            "{'pwsh.exe', '-NoLogo'}"
-        } else {
-            "{'powershell.exe'}"
-        };
+        // PowerShell 项跟随本机探测（pwsh 7 绝对路径 / PS 5.1），但普通项与管理员
+        // 项必须同源：提取普通项的 args 断言管理员项一致，防止两臂漂移。
+        let normal = lua.find("label='新PowerShell").expect("存在 PowerShell 菜单项");
+        let args_start = normal + lua[normal..].find("args={").expect("args 存在");
+        // 普通项行尾恒为 "args=... } },"——"} }," 的起点即 args 值自身的收尾 }
+        let args_end = args_start + lua[args_start..].find("} },").expect("args 收尾");
+        let ps_args = &lua[args_start..=args_end];
         assert!(
-            lua.contains(&format!(
-                "label='新管理员CMD窗口', args={{'cmd.exe'}}, elevate=true"
-            )),
-            "{lua}"
+            lua.contains(&format!("{ps_args}, elevate=true")),
+            "管理员 PowerShell 项应与普通项使用同一 shell：ps_args={ps_args:?} lua={lua}"
         );
         assert!(
-            lua.contains(&format!("args={ps_args}, elevate=true")),
-            "管理员 PowerShell 项应与普通项使用同一 shell：{lua}"
+            lua.contains("label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true"),
+            "{lua}"
         );
         assert!(!lua.contains("'sudo'"), "不应再依赖 sudo：{lua}");
         // SSH 条目菜单标签带「SSH连接」前缀，DomainName 仍用连接原名，
@@ -421,11 +441,70 @@ mod tests {
             lua.contains("label='SSH连接（MSI）', domain={ DomainName='MSI' }"),
             "{lua}"
         );
-        let empty = emit_launch_menu(&[]);
+        let empty = emit_launch_menu(&[], None);
         assert!(
             empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell") && !empty.contains("DomainName"),
             "{empty}"
         );
+    }
+
+    #[test]
+    fn pwsh_default_prog_forces_pwsh_menu_even_on_green_install() {
+        // 绿色版 pwsh（不在 PATH/ProgramFiles）兜底层：配置快照 default_prog
+        // 指向 pwsh.exe（探测只看文件名，路径任意）时菜单必须是 pwsh 7 项。
+        // 本机位置探测层可能命中也可能不命中（环境相关），因此这里断言的是
+        // 环境无关的回归不变量：绝不发射裸名 pwsh.exe，且 pwsh 项一定带
+        // 绝对路径形式的 args。
+        let conns = vec![SshConnection {
+            name: "MSI".into(),
+            host: "192.168.1.100".into(),
+            port: 22,
+            username: "sb".into(),
+            key_path: String::new(),
+            initial_command: String::new(),
+        }];
+        let prog: Vec<String> = vec![r"X:\nonexistent\pwsh.exe".into(), "-NoLogo".into()];
+        let lua = emit_launch_menu(&conns, Some(&prog));
+        assert!(
+            lua.contains("label='新PowerShell 7窗口'"),
+            "default_prog 指向 pwsh.exe 时应发射 pwsh 7 菜单项：{lua}"
+        );
+        assert!(
+            !lua.contains("args={'pwsh.exe'"),
+            "绝不能发射裸名 pwsh.exe（绿色版不在 PATH 时启动失败）：{lua}"
+        );
+        assert!(
+            lua.contains("pwsh.exe', '-NoLogo'"),
+            "pwsh 项应带绝对路径 + -NoLogo：{lua}"
+        );
+    }
+
+    #[test]
+    fn launch_menu_never_emits_bare_pwsh() {
+        // 回归：配置 UI 每次保存都无条件重写 launch_menu，曾把 PowerShell 菜单项
+        // 发射成裸名 pwsh.exe，覆盖掉用户手改的绝对路径（绿色版安装下选菜单
+        // 即 didn't exit cleanly）。无论探测走哪一层，都不得再出现裸名。
+        for lua in [emit_launch_menu(&[], None), emit_launch_menu(&[], Some(&[]))] {
+            assert!(
+                !lua.contains("args={'pwsh.exe'"),
+                "绝不能发射裸名 pwsh.exe：{lua}"
+            );
+        }
+    }
+
+    #[test]
+    fn default_prog_filename_probe_distinguishes_pwsh_from_ps5() {
+        // 文件名判定层（纯函数）只认 pwsh(.exe)，不把 powershell.exe 误判成 pwsh 7。
+        // 路径逐字透传（即安装位），供发射层作绝对路径使用。
+        let probe = super::pwsh_path_from_prog;
+        let pwsh = vec![r"X:\anywhere\pwsh.exe".to_string()];
+        let pwsh_unix = vec!["/opt/pwsh".to_string()];
+        let ps5 = vec!["powershell.exe".to_string()];
+        let cmd = vec!["cmd.exe".to_string()];
+        assert_eq!(probe(&pwsh), Some(r"X:\anywhere\pwsh.exe".to_string()));
+        assert_eq!(probe(&pwsh_unix), Some("/opt/pwsh".to_string()));
+        assert_eq!(probe(&ps5), None, "powershell.exe 不是 pwsh");
+        assert_eq!(probe(&cmd), None, "cmd.exe 不是 pwsh");
     }
 
     #[test]

@@ -593,6 +593,8 @@ pub enum KeyAssignment {
     SplitVertical(SpawnCommand),
     ShowLauncher,
     ShowLauncherArgs(LauncherActionArgs),
+    /// Toggle the SFTP file browser sidebar for the current SSH domain
+    ToggleSftpPanel,
     ClearScrollback(ScrollbackEraseMode),
     Search(Pattern),
     ActivateCopyMode,

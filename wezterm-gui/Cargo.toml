@@ -79,6 +79,7 @@ parking_lot.workspace = true
 portable-pty = { workspace=true, features = ["serde_support"]}
 promise.workspace = true
 rangeset.workspace = true
+futures-lite.workspace = true
 ratelim.workspace = true
 rayon.workspace = true
 regex.workspace = true
@@ -123,6 +124,9 @@ winapi = { workspace=true, features = [
     "handleapi",
     "fileapi",
     "namedpipeapi",
+    "objbase",
+    "ole2",
+    "oleidl",
     "shellapi",
     "synchapi",
     "winsock2",
