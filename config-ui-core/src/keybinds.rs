@@ -71,14 +71,78 @@ fn quote(v: &str) -> String {
     format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
 }
 
+/// JSON 文本 → Lua 表构造器表达式（对象 null 值跳过 = 缺省语义;数组 null 保留
+/// nil 占位）。读回端把结构参数存成 JSON 文本,发射时必须还原为表:按字符串
+/// 发射会被 Lua 端拒绝(SplitHorizontal 的 SpawnCommand 不收 String),
+/// 而裸 JSON 文本本身也不是合法 Lua。
+fn json_to_lua(v: &Value, out: &mut String) {
+    match v {
+        Value::Null => out.push_str("nil"),
+        Value::Bool(b) => out.push_str(if *b { "true" } else { "false" }),
+        Value::Number(n) => out.push_str(&n.to_string()),
+        Value::String(s) => out.push_str(&quote(s)),
+        Value::Array(a) => {
+            out.push('{');
+            for (i, item) in a.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                json_to_lua(item, out);
+            }
+            out.push('}');
+        }
+        Value::Object(map) => {
+            out.push('{');
+            for (i, (k, val)) in map.iter().filter(|(_, v)| !v.is_null()).enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                if is_plain_ident(k) {
+                    out.push_str(k);
+                    out.push('=');
+                } else {
+                    out.push('[');
+                    out.push_str(&quote(k));
+                    out.push_str("]=");
+                }
+                json_to_lua(val, out);
+            }
+            out.push('}');
+        }
+    }
+}
+
+/// Lua 标识符(非保留字):可直接用 key= 形式,否则必须 ["key"]= 形式。
+fn is_plain_ident(k: &str) -> bool {
+    let mut chars = k.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+        && !matches!(
+            k,
+            "and" | "break" | "do" | "else" | "elseif" | "end" | "false" | "for" | "function"
+                | "goto" | "if" | "in" | "local" | "nil" | "not" | "or" | "repeat" | "return"
+                | "then" | "true" | "until" | "while"
+        )
+}
+
 fn action_lua(name: &str, arg: &str) -> String {
     if arg.is_empty() {
-        format!("wezterm.action.{name}")
-    } else if arg.parse::<f64>().is_ok() {
-        format!("wezterm.action.{name}({arg})")
-    } else {
-        format!("wezterm.action.{name}({})", quote(arg))
+        return format!("wezterm.action.{name}");
     }
+    if arg.parse::<f64>().is_ok() {
+        return format!("wezterm.action.{name}({arg})");
+    }
+    if let Ok(v) = serde_json::from_str::<Value>(arg) {
+        if v.is_object() || v.is_array() {
+            let mut buf = String::new();
+            json_to_lua(&v, &mut buf);
+            return format!("wezterm.action.{name}({buf})");
+        }
+    }
+    format!("wezterm.action.{name}({})", quote(arg))
 }
 
 /// 发射整组 config.keys 赋值；列表为空返回空串。
@@ -201,19 +265,30 @@ mod tests {
 
     #[test]
     fn emission_roundtrips_through_loader() {
+        // SpawnCommand 结构参数读回后的真实形态(Rust 加载时补全默认值再序列化)
+        let spawn_cmd_json = r#"{"args":null,"cwd":null,"domain":"CurrentPaneDomain","elevate":false,"label":null,"position":null,"set_environment_variables":{}}"#;
         let bindings = vec![
             Binding { mods: "CTRL|SHIFT".into(), key: "c".into(), action_name: "CopyTo".into(), action_arg: "Clipboard".into() },
             Binding { mods: "ALT".into(), key: "1".into(), action_name: "ActivateTab".into(), action_arg: "0".into() },
             Binding { mods: "CTRL".into(), key: "r".into(), action_name: "ReloadConfiguration".into(), action_arg: "".into() },
+            Binding { mods: "ALT".into(), key: "RightArrow".into(), action_name: "SplitHorizontal".into(), action_arg: spawn_cmd_json.into() },
         ];
         let lua = emit_bindings(&bindings);
         assert!(lua.contains("config.keys"));
+        // 字符串参数按原样;结构参数必须还原为表字面量(官方惯用形式)
+        assert!(lua.contains("wezterm.action.CopyTo('Clipboard')"), "{lua}");
+        assert!(
+            lua.contains(
+                "wezterm.action.SplitHorizontal({domain='CurrentPaneDomain',elevate=false,set_environment_variables={}})"
+            ),
+            "{lua}"
+        );
         // 构造完整脚本走真实读链路再解析回来
         let src = format!("local config = {{}}\n{lua}return config\n");
         let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
         let snap = crate::load::config_to_json(&loaded.config);
         let back = parse_bindings(&snap);
-        assert_eq!(back.len(), 3);
+        assert_eq!(back.len(), 4);
         // 加载端会把 mods 重排为规范顺序（如 CTRL|SHIFT → SHIFT|CTRL），按组合键语义比较
         for (a, b) in back.iter().zip(bindings.iter()) {
             assert_eq!(a.combo(), b.combo());

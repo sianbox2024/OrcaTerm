@@ -37,7 +37,7 @@ use winapi::um::winuser::{
     WM_SETICON,
 };
 
-actions!(config_ui, [Quit]);
+actions!(config_ui, [Quit, MoveFocusNext, MoveFocusPrev]);
 
 const SLIDER_MIN: f32 = 8.0;
 const SLIDER_MAX: f32 = 24.0;
@@ -136,7 +136,13 @@ fn main() {
     let _keep = single_instance.ok();
     let _ = gpui_platform::application().run(|cx: &mut App| {
         bind_input_keys(cx);
-        cx.bind_keys([KeyBinding::new("ctrl-q", Quit, None)]);
+        cx.bind_keys([
+            KeyBinding::new("ctrl-q", Quit, None),
+            // Tab/Shift+Tab 在输入框间切换焦点(TextInput 自带 track_focus,
+            // 自动注册为 tab stop,序列=当前页渲染顺序)
+            KeyBinding::new("tab", MoveFocusNext, None),
+            KeyBinding::new("shift-tab", MoveFocusPrev, None),
+        ]);
         cx.on_action(|_: &Quit, cx| cx.quit());
 
         // Load icon (gpui WindowOptions.icon is X11-only; we set Win32 HWND icon after open)
@@ -617,7 +623,7 @@ impl ConfigUi {
             &self.ssh_conns,
             self.form.default_prog.as_deref(),
         ));
-        // format-tab-title：「标签页按颜色区分」开=彩色版（非激活 tab 按主题
+        // format-tab-title：「标签页按颜色区分」开=彩色版（激活 tab 按主题
         // ANSI 亮色六色循环着色），关=普通版。始终发射：整文件重写后回调必须
         // 仍在，且关态会自然替换掉旧的彩色标记。
         let tab_colors = settings::index(settings::TAB_COLOR_DISTINCT_KEY)
@@ -640,9 +646,9 @@ impl ConfigUi {
     }
 
     fn reset(&mut self, _: &MouseDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
-        self.reload_from_disk(cx);
-        self.dirty = 0;
-        cx.notify();
+        // 放弃改动 = 丢弃未保存修改并关闭窗口(不写文件,与「保存并关闭」对称)。
+        // 旧实现只从磁盘重载表单,在加载失败/无改动场景肉眼无变化,像点了没反应。
+        cx.quit();
     }
 
     fn set_slider_value(&mut self, drag: SliderDrag, x: Pixels, cx: &mut Context<Self>) {
@@ -2015,6 +2021,24 @@ impl Render for ConfigUi {
             .flex_col()
             .bg(theme::bg_base())
             .text_color(theme::fg_main())
+            // Tab/Shift+Tab 移动焦点;gpui 的 focus_next/prev 到序列末尾不环绕,
+            // 这里补常规对话框的循环语义(焦点没变=已到头,blur 后再走一次=回绕)
+            .on_action(cx.listener(|_, _: &MoveFocusNext, window, cx| {
+                let before = window.focused(cx);
+                window.focus_next(cx);
+                if window.focused(cx) == before && before.is_some() {
+                    window.blur();
+                    window.focus_next(cx);
+                }
+            }))
+            .on_action(cx.listener(|_, _: &MoveFocusPrev, window, cx| {
+                let before = window.focused(cx);
+                window.focus_prev(cx);
+                if window.focused(cx) == before && before.is_some() {
+                    window.blur();
+                    window.focus_prev(cx);
+                }
+            }))
             .child(self.render_action_bar(cx))
             .when(self.error.is_some(), |d| {
                 d.child(

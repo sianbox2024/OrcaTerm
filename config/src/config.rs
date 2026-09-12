@@ -1044,8 +1044,8 @@ config.mouse_bindings = {
     /// orca-term: format-tab-title「标签页按颜色区分」彩色回调的唯一事实源。
     /// 首启默认配置文件生成（%FORMAT_TAB_TITLE% 占位符）与配置界面发射
     /// （config-ui-core ssh::emit_format_tab_title(true)）共用，避免两处漂移。
-    /// 该功能默认开：非激活 tab 按 tab_id 从 ANSI 亮色六色循环取底色，
-    /// 激活 tab 保持原样式；空标题兜底防止 tab 只剩关闭按钮。
+    /// 该功能默认开：激活 tab 按 tab_id 从 ANSI 亮色六色循环取底色，
+    /// 非激活 tab 保持原样式；空标题兜底防止 tab 只剩关闭按钮。
     pub const FORMAT_TAB_TITLE_COLORED_LUA: &'static str = "\
 wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max_width)
   local title = tab.tab_title
@@ -1060,7 +1060,7 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max
     title = '终端'
   end
   -- orca:tab-colors
-  if not tab.is_active then
+  if tab.is_active then
     local hues = {'Red', 'Lime', 'Yellow', 'Blue', 'Fuchsia', 'Aqua'}
     local bg = hues[(tab.tab_id % #hues) + 1]
     return {
@@ -1105,7 +1105,7 @@ config.launch_menu = {
   { label = '新管理员PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }, elevate = true },
 }
 
--- 标签页按颜色区分（默认开；非激活 tab 彩色，激活 tab 保持原样式）
+-- 标签页按颜色区分（默认开；激活 tab 彩色高亮，非激活 tab 保持原样式）
 %FORMAT_TAB_TITLE%
 
 return config

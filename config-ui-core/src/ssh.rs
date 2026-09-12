@@ -292,9 +292,9 @@ const TAB_TITLE_HEAD_LUA: &str = "wezterm.on('format-tab-title', function(tab, t
 /// 发射 format-tab-title 回调。
 /// colored=true:「标签页按颜色区分」开——直接使用 config crate 的
 /// FORMAT_TAB_TITLE_COLORED_LUA(与首启默认模板同一事实源,避免两处漂移):
-/// 非激活 tab 按内部 id 从 ANSI 亮色六色循环取底色(随当前配色方案解析,
+/// 激活 tab 按内部 id 从 ANSI 亮色六色循环取底色(随当前配色方案解析,
 /// 换主题颜色自动跟随;tab_id 终生不变,同一 tab 颜色稳定),黑字保证可读;
-/// 激活 tab 保持原有激活样式,一眼定位当前页。
+/// 非激活 tab 保持原有样式,一眼定位当前页。
 /// colored=false:普通版(带关闭标记),标题原样(激活/非激活样式交给
 /// tab_bar 配色)。两个变体各带探测标记行,供 detect_tab_colors 读回状态。
 pub fn emit_format_tab_title(colored: bool) -> String {

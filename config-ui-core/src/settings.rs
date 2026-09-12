@@ -165,7 +165,7 @@ pub static SETTINGS: &[SettingSpec] = &[
     SettingSpec { key: "show_tabs_in_tab_bar", label: "标签栏显示标签", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "switch_to_last_active_tab_when_closing_tab", label: "关标签时回到上个活动标签", kind: Kind::Bool, page: 3 },
     // 伪设置项:开=保存时经 ssh::emit_format_tab_title(true) 发射彩色
-    // format-tab-title(非激活 tab 按 ANSI 亮色六色循环着色);关=发射普通版。
+    // format-tab-title(激活 tab 按 ANSI 亮色六色循环着色);关=发射普通版。
     // 状态不存在于 JSON 快照,由配置 UI 以 ssh::detect_tab_colors 探测文件回填。
     SettingSpec { key: TAB_COLOR_DISTINCT_KEY, label: "标签页按颜色区分", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "tab_and_split_indices_are_zero_based", label: "标签/面板序号从 0 开始", kind: Kind::Bool, page: 3 },
