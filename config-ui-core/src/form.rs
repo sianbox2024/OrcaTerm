@@ -80,8 +80,10 @@ fn font_family_of(v: &Value) -> Option<String> {
 }
 
 impl FormState {
-    /// 从生效配置快照填充表单；`defaults` 为空配置快照（用于区分「用户设了」与「默认值」，本任务先只做取值）。
-    pub fn from_snapshot(snap: &Value, _defaults: &Value) -> Self {
+    /// 从生效配置快照填充表单；`defaults` 为空配置快照（出厂默认值）。
+    /// 快照缺失的键（典型：配置加载失败后快照为空）回退 defaults——
+    /// 否则表单数值全为 0，整文件重写会发射 font_size=0 等非法配置。
+    pub fn from_snapshot(snap: &Value, defaults: &Value) -> Self {
         let font_family = snap.get("font").and_then(font_family_of);
         let prog: Option<Vec<String>> = snap.get("default_prog").and_then(|p| {
             p.as_array().map(|a| {
@@ -91,7 +93,7 @@ impl FormState {
             })
         });
         Self {
-            scalars: SettingsForm::from_snapshot(snap),
+            scalars: SettingsForm::from_snapshot(snap, defaults),
             font_family,
             color_scheme: s(snap, "color_scheme").to_string(),
             foreground: s(snap.get("colors").unwrap_or(&Value::Null), "foreground").to_string(),

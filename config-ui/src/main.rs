@@ -14,7 +14,7 @@ use config_ui_core::schemes::{SchemeInfo, builtin_schemes};
 use config_ui_core::settings::{self, Kind, SettingValue, SETTINGS};
 use config_ui_core::ssh::{self, SshConnection};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Bounds, Context, Entity, KeyBinding,
+    actions, div, prelude::*, px, rgb, size, App, Bounds, Context, Entity, Focusable, KeyBinding,
     KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
     Window, WindowBounds, WindowOptions,
 };
@@ -1820,8 +1820,17 @@ impl ConfigUi {
                             .bg(if self.capture_mode { theme::accent_dim() } else { theme::bg_elevated() })
                             .text_size(px(12.)).text_color(theme::fg_main())
                             .child(capture_label)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| {
                                 this.capture_mode = !this.capture_mode;
+                                // 按键事件只沿焦点路径冒泡:不聚焦时容器的 on_key_down
+                                // 截不到任何键,用户就得先手动点一下输入框——进入捕获态
+                                // 直接聚焦键名框,按下组合键即被截获。
+                                if this.capture_mode {
+                                    if let Some(input) = &this.edit_key_input {
+                                        let handle = input.read(cx).focus_handle(cx);
+                                        window.focus(&handle, cx);
+                                    }
+                                }
                                 cx.notify();
                             })),
                     ),

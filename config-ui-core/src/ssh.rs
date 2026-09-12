@@ -432,7 +432,7 @@ mod tests {
         let defaults = crate::load::load_from_source("return {}\n", std::path::Path::new("d.lua"))
             .unwrap();
         let defaults = crate::load::config_to_json(&defaults.config);
-        let mut fm = crate::settings::SettingsForm::from_snapshot(&defaults);
+        let mut fm = crate::settings::SettingsForm::from_snapshot(&defaults, &defaults);
         let idx = crate::settings::index(crate::settings::TAB_COLOR_DISTINCT_KEY).unwrap();
         assert!(!fm.bool_at(idx));
         fm.set_bool(idx, true);

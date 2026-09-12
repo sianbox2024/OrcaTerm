@@ -403,11 +403,11 @@ pub fn lua_quote(v: &str) -> String {
 }
 
 impl SettingsForm {
-    pub fn from_snapshot(snap: &Value) -> Self {
+    pub fn from_snapshot(snap: &Value, defaults: &Value) -> Self {
         Self {
             values: SETTINGS
                 .iter()
-                .map(|spec| read_value(spec, snap))
+                .map(|spec| read_value(spec, snap, defaults))
                 .collect(),
         }
     }
@@ -469,7 +469,9 @@ impl SettingsForm {
         let mut out = String::new();
         for (idx, spec) in SETTINGS.iter().enumerate() {
             let cur = &self.values[idx];
-            let base = read_value(spec, baseline);
+            // baseline 即出厂默认快照(to_lua 的唯一调用方传 self.baseline),
+            // 缺失键的读出与 defaults 同源
+            let base = read_value(spec, baseline, baseline);
             if cur == &base {
                 continue;
             }
@@ -509,7 +511,7 @@ impl SettingsForm {
     }
 }
 
-fn read_value(spec: &SettingSpec, snap: &Value) -> SettingValue {
+fn read_value(spec: &SettingSpec, snap: &Value, defaults: &Value) -> SettingValue {
     // 伪设置项：以快照中 mouse_bindings 非空作为开态。
     // mouse_bindings 只可能来自本开关的发射（GUI 保存会整文件重写、其他来源不保留），
     // 因此「非空=开」是忠实回显，无需在 Lua 里另藏标记字段（未知字段会被 wezterm 报错）。
@@ -521,7 +523,13 @@ fn read_value(spec: &SettingSpec, snap: &Value) -> SettingValue {
             .unwrap_or(false);
         return SettingValue::Bool(on);
     }
-    let v = snap.get(spec.key);
+    // 快照缺失该键（典型：配置加载失败后快照为空）时回退出厂默认值，
+    // 而不是零值——零值表单被整文件重写会发射 font_size=0、line_height=0
+    // 等非法配置，主程序整个加载失败。
+    let v = match snap.get(spec.key) {
+        Some(v) => Some(v),
+        None => defaults.get(spec.key),
+    };
     match spec.kind {
         Kind::Bool => SettingValue::Bool(v.and_then(|x| x.as_bool()).unwrap_or(false)),
         Kind::Int { .. } => SettingValue::Int(num_of(v) as i64),
@@ -587,7 +595,7 @@ mod tests {
             "selection_word_boundary": " \t\n",
             "default_gui_startup_args": ["start", "--no-auto-connect"],
         });
-        let form = SettingsForm::from_snapshot(&snap);
+        let form = SettingsForm::from_snapshot(&snap, &snap);
         let auto = index("automatically_reload_config").unwrap();
         let rate = index("cursor_blink_rate").unwrap();
         let thick = index("cursor_thickness").unwrap();
@@ -609,7 +617,7 @@ mod tests {
 
     #[test]
     fn missing_keys_fall_back_to_zero_and_empty() {
-        let form = SettingsForm::from_snapshot(&json!({}));
+        let form = SettingsForm::from_snapshot(&json!({}), &json!({}));
         let auto = index("automatically_reload_config").unwrap();
         let style = index("default_cursor_style").unwrap();
         assert!(!form.bool_at(auto));
@@ -619,7 +627,7 @@ mod tests {
     #[test]
     fn to_lua_emits_only_diffs_with_correct_literals() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         assert!(fm.to_lua(&defaults).is_empty(), "与基线一致不得发射任何字段");
 
         let auto = index("automatically_reload_config").unwrap();
@@ -642,7 +650,7 @@ mod tests {
     #[test]
     fn to_lua_handles_float_int_and_list() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let size = index("char_select_font_size").unwrap();
         let cols = index("initial_cols").unwrap();
         let args = index("default_gui_startup_args").unwrap();
@@ -664,7 +672,7 @@ mod tests {
     #[test]
     fn empty_string_means_follow_default() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let ws = index("default_workspace").unwrap();
         assert!(!fm.str_at(ws).is_empty() || true); // 默认可能为空，不参与断言
         fm.set_str(ws, String::new());
@@ -675,7 +683,7 @@ mod tests {
     #[test]
     fn backslash_and_quote_paths_survive_roundtrip() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let cwd = index("default_cwd").unwrap();
         fm.set_str(cwd, r"C:\Users\testuser\notes 'dir'".into());
         let lua = fm.to_lua(&defaults);
@@ -683,7 +691,7 @@ mod tests {
         let src = format!("local config = {{}}\n{lua}return config\n");
         let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
         let snap = crate::load::config_to_json(&loaded.config);
-        let back = SettingsForm::from_snapshot(&snap);
+        let back = SettingsForm::from_snapshot(&snap, &snap);
         assert_eq!(back.str_at(cwd), r"C:\Users\testuser\notes 'dir'");
     }
 
@@ -691,7 +699,7 @@ mod tests {
     #[test]
     fn registry_roundtrip_through_loader() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let scroll = index("enable_scroll_bar").unwrap();
         let bell = index("audible_bell").unwrap();
         let backdrop = index("win32_system_backdrop").unwrap();
@@ -710,7 +718,7 @@ mod tests {
         let src = format!("local config = {{}}\n{lua}return config\n");
         let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
         let snap = crate::load::config_to_json(&loaded.config);
-        let back = SettingsForm::from_snapshot(&snap);
+        let back = SettingsForm::from_snapshot(&snap, &snap);
         assert!(back.bool_at(scroll));
         assert_eq!(back.str_at(bell), "Disabled");
         assert_eq!(back.str_at(backdrop), "Mica");
@@ -724,7 +732,7 @@ mod tests {
     #[test]
     fn smart_right_click_toggle_emits_binding_and_roundtrips() {
         let defaults = load_defaults();
-        let mut fm = SettingsForm::from_snapshot(&defaults);
+        let mut fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let idx = index(RIGHT_CLICK_SMART_KEY).unwrap();
         assert!(!fm.bool_at(idx)); // 出厂默认关
         fm.set_bool(idx, true);
@@ -737,7 +745,7 @@ mod tests {
         let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
         assert_eq!(loaded.config.mouse_bindings.len(), 1);
         let snap = crate::load::config_to_json(&loaded.config);
-        let back = SettingsForm::from_snapshot(&snap);
+        let back = SettingsForm::from_snapshot(&snap, &snap);
         assert!(back.bool_at(idx), "回读快照后开关应为开态");
     }
 
@@ -745,7 +753,7 @@ mod tests {
     #[test]
     fn smart_right_click_off_emits_nothing() {
         let defaults = load_defaults();
-        let fm = SettingsForm::from_snapshot(&defaults);
+        let fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let lua = fm.to_lua(&defaults);
         assert!(!lua.contains("mouse_bindings"), "{lua}");
     }
@@ -807,8 +815,28 @@ mod tests {
     #[test]
     fn enum_baseline_is_real_default_not_empty() {
         let defaults = load_defaults();
-        let fm = SettingsForm::from_snapshot(&defaults);
+        let fm = SettingsForm::from_snapshot(&defaults, &defaults);
         let backdrop = index("win32_system_backdrop").unwrap();
         assert_eq!(fm.str_at(backdrop), "Auto");
+    }
+
+    /// 快照缺失的键（配置加载失败 → 空快照）必须回退出厂默认而不是零值——
+    /// 零值表单经整文件重写会发射 font_size=0、line_height=0，主程序整个配置加载失败。
+    #[test]
+    fn missing_snapshot_keys_fall_back_to_factory_defaults() {
+        let defaults = load_defaults();
+        let form = SettingsForm::from_snapshot(&json!({}), &defaults);
+        let font = index("font_size").unwrap();
+        let line_height = index("line_height").unwrap();
+        let expected_font = defaults.get("font_size").and_then(|v| v.as_f64()).unwrap();
+        assert_eq!(form.float_at(font), expected_font);
+        assert_eq!(
+            form.float_at(line_height),
+            defaults.get("line_height").and_then(|v| v.as_f64()).unwrap()
+        );
+        assert!(form.float_at(line_height) > 0.0);
+        // 布尔默认同样回退（anti_alias_custom_block_glyphs 出厂为 true）
+        let alias = index("anti_alias_custom_block_glyphs").unwrap();
+        assert!(form.bool_at(alias));
     }
 }
