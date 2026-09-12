@@ -458,7 +458,24 @@ impl Pane for LocalPane {
                 }
             }
         }
-
+        // 空标题回退:远端应用(自定义提示符、nano 等)可能发空 OSC 标题,
+        // tab 栏会渲染成只剩关闭按钮的空 tab,宽度极窄,切换 tab 时极易
+        // 误点关闭。回退顺序:前台进程名 → 域名 → 通用名。
+        if title.is_empty() {
+            if let Some(proc_name) = self.get_foreground_process_name(CachePolicy::AllowStale) {
+                let proc_name = std::path::Path::new(&proc_name);
+                if let Some(name) = proc_name.file_name() {
+                    return name.to_string_lossy().to_string();
+                }
+            }
+            if let Some(domain) = Mux::try_get().and_then(|m| m.get_domain(self.domain_id)) {
+                let name = domain.domain_name();
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+            return "终端".to_string();
+        }
         title
     }
 

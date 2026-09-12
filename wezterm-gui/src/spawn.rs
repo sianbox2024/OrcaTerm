@@ -171,7 +171,7 @@ pub async fn spawn_command_internal(
 
 /// 以管理员身份启动一个新的 OrcaTerm GUI 实例来处理提权 spawn 请求。
 /// 用 `ShellExecuteW` 的 runas 动词触发 UAC；用户确认后新实例以管理员
-/// 令牌运行，其 spawn 的 shell 天然提权。使用 --always-new-process 避免
+/// 令牌运行，其 spawn 的 shell 天然继承管理员令牌。使用 --always-new-process 避免
 /// 新实例把请求回投给本（未提权）实例。
 #[cfg(windows)]
 fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
@@ -230,4 +230,63 @@ fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
         }
     }
     Ok(())
+}
+
+/// 执行一条完整的命令行（SFTP 外部工具等"快捷方式式"命令），如
+/// `"D:\Program Files (x86)\WinSCP\WinSCP.exe" "会话名" /Desktop`。
+/// 拆分规则与 CreateProcess 一致：带引号的 exe 取到配对引号，否则取首个
+/// 空格前的段；其余为参数。用 ShellExecuteW「open」拉起（解析 PATH、
+/// 无控制台窗口、目录式协议处理器也能走）。
+#[cfg(windows)]
+pub fn shell_execute_command_line(command: &str) {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use winapi::um::shellapi::ShellExecuteW;
+    use winapi::um::winuser::SW_SHOWNORMAL;
+
+    fn wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    }
+
+    let command = command.trim();
+    let (file, parameters) = if let Some(rest) = command.strip_prefix('"') {
+        match rest.find('"') {
+            Some(end) => (&rest[..end], rest[end + 1..].trim_start()),
+            None => (command, ""),
+        }
+    } else {
+        match command.split_once(' ') {
+            Some((exe, rest)) => (exe, rest.trim_start()),
+            None => (command, ""),
+        }
+    };
+    if file.is_empty() {
+        log::error!("SFTP 命令为空，无法执行：{command:?}");
+        return;
+    }
+
+    let verb = wide("open");
+    let file_w = wide(file);
+    let params_w = wide(parameters);
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            verb.as_ptr(),
+            file_w.as_ptr(),
+            params_w.as_ptr(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as i32 <= 32 {
+        log::error!(
+            "SFTP 命令执行失败（ShellExecuteW 错误码 {}）：{command}",
+            result as i32
+        );
+    }
+}
+
+#[cfg(not(windows))]
+pub fn shell_execute_command_line(_command: &str) {
+    log::error!("SFTP 外部工具命令仅支持 Windows");
 }

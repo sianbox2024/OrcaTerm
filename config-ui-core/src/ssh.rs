@@ -77,6 +77,9 @@ pub struct SshConnection {
     /// 连接后执行的命令（如 `cd /data/project`）；空 = 直接进默认 shell。
     /// 发射时包装为 default_prog={'sh','-c','<命令>; exec $SHELL'}。
     pub initial_command: String,
+    /// 点标签栏 SFTP 按钮时对该连接执行的外部命令（如拉起 WinSCP）；
+    /// 空 = 按钮提示未配置。产品决策：SFTP 功能由第三方工具承担。
+    pub sftp_command: String,
 }
 
 /// 从生效配置快照解析用户 ssh_domains。端口内嵌在 remote_address（host:port）里。
@@ -116,6 +119,11 @@ pub fn parse_ssh_domains(snap: &Value) -> Vec<SshConnection> {
                                 )
                             })
                             .unwrap_or_default(),
+                        sftp_command: d
+                            .get("sftp_command")
+                            .and_then(|x| x.as_str())
+                            .unwrap_or("")
+                            .to_string(),
                     })
                 })
                 .collect()
@@ -208,6 +216,11 @@ pub fn emit_ssh_domains(conns: &[SshConnection]) -> String {
             let items: Vec<String> = prog.iter().map(|v| quote(v)).collect();
             out.push_str(&format!(", default_prog={{{}}}", items.join(",")));
         }
+        // SFTP 外部命令：留空不发射（按钮未配置时提示），非空原样单引号转义
+        let sftp = c.sftp_command.trim();
+        if !sftp.is_empty() {
+            out.push_str(&format!(", sftp_command={}", quote(sftp)));
+        }
         out.push_str(" },\n");
     }
     out.push_str("}\n");
@@ -258,24 +271,59 @@ pub fn emit_launch_menu(conns: &[SshConnection], default_prog: Option<&[String]>
         ));
     }
     out.push_str("}\n");
-    // tab 标题「(管理员)」标记：前台进程提权时加前缀（PaneInformation.is_elevated，
-    // 由 procinfo::LocalProcessInfo::is_elevated 提供，仅 Windows）
+    out
+}
+
+/// format-tab-title 空标题兜底 Lua(两种变体共用):标题为空时 tab 栏
+/// 只剩关闭按钮,宽度极窄极易误点。
+const TAB_TITLE_HEAD_LUA: &str = "wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max_width)\n\
+   local title = tab.tab_title\n\
+   if #title == 0 then\n\
+   \x20 title = tab.active_pane.title\n\
+   end\n\
+   local pane = tab.active_pane\n\
+   if pane and pane.is_elevated then\n\
+   \x20 title = '(管理员)' .. title\n\
+   end\n\
+   if #title == 0 then\n\
+   \x20 title = '终端'\n\
+   end\n";
+
+/// 发射 format-tab-title 回调。
+/// colored=true:「标签页按颜色区分」开——直接使用 config crate 的
+/// FORMAT_TAB_TITLE_COLORED_LUA(与首启默认模板同一事实源,避免两处漂移):
+/// 非激活 tab 按内部 id 从 ANSI 亮色六色循环取底色(随当前配色方案解析,
+/// 换主题颜色自动跟随;tab_id 终生不变,同一 tab 颜色稳定),黑字保证可读;
+/// 激活 tab 保持原有激活样式,一眼定位当前页。
+/// colored=false:普通版(带关闭标记),标题原样(激活/非激活样式交给
+/// tab_bar 配色)。两个变体各带探测标记行,供 detect_tab_colors 读回状态。
+pub fn emit_format_tab_title(colored: bool) -> String {
+    if colored {
+        return config::Config::FORMAT_TAB_TITLE_COLORED_LUA.to_string();
+    }
+    let mut out = String::from(TAB_TITLE_HEAD_LUA);
+    out.push_str("   -- orca:tab-colors-off\n");
     out.push_str(
-        "wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max_width)\n\
-         \x20 local title = tab.tab_title\n\
-         \x20 if #title == 0 then\n\
-         \x20   title = tab.active_pane.title\n\
-         \x20 end\n\
-         \x20 local pane = tab.active_pane\n\
-         \x20 if pane and pane.is_elevated then\n\
-         \x20   title = '(管理员)' .. title\n\
-         \x20 end\n\
-         \x20 return {\n\
+        "   return {\n\
          \x20   { Text = title },\n\
-         \x20 }\n\
+         }\n\
          end)\n",
     );
     out
+}
+
+/// 探测配置文件的「标签页按颜色区分」状态:彩色版带 on 标记,普通版带
+/// off 标记;都没有(全新/历史遗留配置)返回 None——调用方按默认**开**处理
+/// (该功能的预期是开箱即见,用户可显式关闭)。
+pub fn detect_tab_colors(src: &str) -> Option<bool> {
+    // 注意先查 off:on 系标记互为前缀
+    if src.contains("-- orca:tab-colors-off") {
+        Some(false)
+    } else if src.contains("-- orca:tab-colors") {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// 保存前校验：名称/主机非空、名称唯一、名称不含引号与反斜杠（Lua 注入面收口）。
@@ -334,6 +382,66 @@ mod tests {
         assert!(parse_ssh_domains(&json!({})).is_empty());
     }
 
+    /// 「标签页按颜色区分」彩色版 Lua 必须经真实加载链路（FormatItem 拼写、
+    /// AnsiColor 取值、tab 字段名任何手误都会在这里炸），且探测标记只存在于
+    /// 彩色版;伪设置项本身绝不能泄漏为 config.* 未知字段。
+    #[test]
+    fn tab_color_lua_loads_and_detects() {
+        let colored = emit_format_tab_title(true);
+        assert!(colored.contains("-- orca:tab-colors"), "{colored}");
+        assert!(colored.contains("AnsiColor"), "{colored}");
+        assert!(colored.contains("tab.is_active"), "{colored}");
+        assert!(colored.contains("(管理员)"), "{colored}");
+        assert!(colored.contains("终端"), "空标题兜底缺失 {colored}");
+
+        let plain = emit_format_tab_title(false);
+        assert!(!plain.contains("-- orca:tab-colors\n") && !plain.contains("-- orca:tab-colors \n"), "{plain}");
+        assert!(plain.contains("-- orca:tab-colors-off"), "{plain}");
+        assert!(plain.contains("(管理员)"), "{plain}");
+        assert_eq!(detect_tab_colors(&colored), Some(true));
+        assert_eq!(detect_tab_colors(&plain), Some(false));
+        // 全新/历史遗留配置（无任何标记）→ None,调用方按默认开处理
+        assert_eq!(detect_tab_colors("local config = {}\nreturn config\n"), None);
+
+        // 真实加载:彩色版与普通版都必须零警告（未知字段/未知事件参数会在这里暴露）
+        let conns = vec![SshConnection {
+            name: "prod".into(),
+            host: "10.0.0.1".into(),
+            port: 22,
+            username: "u".into(),
+            key_path: String::new(),
+            initial_command: String::new(),
+                sftp_command: String::new(),
+        }];
+        for (tag, callback) in [("colored", &colored), ("plain", &plain)] {
+            let src = format!(
+                "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n\n{}{}return config\n",
+                emit_launch_menu(&conns, None),
+                callback
+            );
+            let loaded =
+                crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
+            assert!(
+                loaded.warnings.is_empty(),
+                "{tag} 加载警告: {:?}",
+                loaded.warnings
+            );
+        }
+
+        // 伪设置项在注册表 to_lua 中不得泄漏为 config.tab_color_distinct 未知字段
+        let defaults = crate::load::load_from_source("return {}\n", std::path::Path::new("d.lua"))
+            .unwrap();
+        let defaults = crate::load::config_to_json(&defaults.config);
+        let mut fm = crate::settings::SettingsForm::from_snapshot(&defaults);
+        let idx = crate::settings::index(crate::settings::TAB_COLOR_DISTINCT_KEY).unwrap();
+        assert!(!fm.bool_at(idx));
+        fm.set_bool(idx, true);
+        assert!(
+            !fm.to_lua(&defaults).contains("tab_color_distinct"),
+            "伪设置项泄漏为 config 字段"
+        );
+    }
+
     #[test]
     fn emit_roundtrip_matches_form_shapes() {
         let conns = vec![SshConnection {
@@ -343,6 +451,7 @@ mod tests {
             username: "root".into(),
             key_path: "C:\\keys\\id_ed25519".into(),
             initial_command: String::new(),
+            sftp_command: r#""D:\Program Files (x86)\WinSCP\WinSCP.exe" "prod" /newinstance"#.into(),
         }];
         let lua = emit_ssh_domains(&conns);
         assert!(lua.contains("name='prod'"), "{lua}");
@@ -350,6 +459,7 @@ mod tests {
         assert!(lua.contains("username='root'"), "{lua}");
         assert!(lua.contains("identityfile='C:\\\\keys\\\\id_ed25519'"), "{lua}");
         assert!(lua.contains("multiplexing='None'"), "{lua}");
+        assert!(lua.contains("sftp_command="), "{lua}");
         assert!(!lua.contains("default_prog"), "{lua}");
         // 发射的 lua 经真实读链路解析后应还原为同一连接（拼接格式与 save() 一致）
         let src = format!(
@@ -364,6 +474,7 @@ mod tests {
     #[test]
     fn initial_command_roundtrip_via_real_loader() {
         let conns = vec![SshConnection {
+                sftp_command: String::new(),
             name: "dev".into(),
             host: "dev.example.com".into(),
             port: 22,
@@ -412,6 +523,7 @@ mod tests {
             username: "sb".into(),
             key_path: String::new(),
             initial_command: String::new(),
+                sftp_command: String::new(),
         }];
         let lua = emit_launch_menu(&conns, None);
         assert!(lua.contains("label='新CMD窗口'"), "{lua}");
@@ -462,6 +574,7 @@ mod tests {
             username: "sb".into(),
             key_path: String::new(),
             initial_command: String::new(),
+                sftp_command: String::new(),
         }];
         let prog: Vec<String> = vec![r"X:\nonexistent\pwsh.exe".into(), "-NoLogo".into()];
         let lua = emit_launch_menu(&conns, Some(&prog));
@@ -516,6 +629,7 @@ mod tests {
             username: String::new(),
             key_path: String::new(),
             initial_command: String::new(),
+                sftp_command: String::new(),
         }];
         assert!(validate(&ok).is_ok());
         let no_host = vec![SshConnection {
@@ -525,6 +639,7 @@ mod tests {
             username: String::new(),
             key_path: String::new(),
             initial_command: String::new(),
+                sftp_command: String::new(),
         }];
         assert!(validate(&no_host).is_err());
         let dup = vec![
@@ -536,6 +651,7 @@ mod tests {
                 username: String::new(),
                 key_path: String::new(),
                 initial_command: String::new(),
+                sftp_command: String::new(),
             },
         ];
         assert!(validate(&dup).is_err());

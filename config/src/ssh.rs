@@ -104,6 +104,12 @@ pub struct SshDomain {
 
     #[dynamic(default)]
     pub assume_shell: Shell,
+
+    /// OrcaTerm:点标签栏 SFTP 按钮时对该连接执行的外部命令（如拉起
+    /// WinSCP:"D:\Program Files (x86)\WinSCP\WinSCP.exe" "会话名" /Desktop）。
+    /// 留空=按钮提示未配置。产品决策:SFTP 功能由第三方工具承担。
+    #[dynamic(default)]
+    pub sftp_command: String,
 }
 impl_lua_conversion_dynamic!(SshDomain);
 

@@ -2,12 +2,13 @@
 //! 通用读取/写回/基线 diff 据此循环工作。新增设置项 = 在 SETTINGS 表注册一行。
 //!
 //! 页面归属（page）对应 config-ui 侧 GROUPS 的索引：
-//! 0=字体与光标 1=配色 2=窗口外观 3=标签栏 4=启动与默认行为 5=终端行为 6=鼠标与选择 9=SSH 连接
+//! 0=字体与光标 1=配色 2=窗口外观 3=标签栏 4=启动与默认行为 5=终端行为 6=鼠标与选择 8=SSH 连接
 //!
-//! 不进注册表的项：
-//! - 复合结构（window_frame、tab_bar_style、HSB 三项、*_font 的 TextStyle、window_padding）
+//! 不进注册表的项（GUI 暂不支持配置；产品决策：配置文件由界面全量管理，
+//! 不提供手写 Lua 入口）：
+//! - 复合结构（window_frame、tab_bar_style、HSB 三项、*_font 的 TextStyle；
+//!   window_padding 例外，走 FormState 专项字段）
 //! - 列表/键值 DSL（key_tables、hyperlink_rules、set_environment_variables 等）
-//!   这些仍走高级编辑区手改 Lua。
 //! 例外：mouse_bindings 以一个伪布尔项（RIGHT_CLICK_SMART_KEY）进注册表——
 //! 开=发射固定的「右键智能复制/粘贴」绑定块，关=不发射；读回以快照中 mouse_bindings 非空为准。
 //! 枚举取值以 config/src/config.rs 及其子模块的真实变体定义为准（2026-08-29 核对）。
@@ -45,6 +46,10 @@ const EASINGS: &[(&str, &str)] = &[
 
 /// 伪设置项 key：不对应 Config 结构字段；开=发射固定的一段 mouse_bindings，关=不发射。
 pub const RIGHT_CLICK_SMART_KEY: &str = "right_click_smart_copy_paste";
+
+/// 伪设置项 key：不对应 Config 结构字段；开=保存时发射彩色 format-tab-title
+/// （ssh::emit_format_tab_title(true)），状态经 ssh::detect_tab_colors 探测文件回显。
+pub const TAB_COLOR_DISTINCT_KEY: &str = "tab_color_distinct";
 
 /// 右键智能复制/粘贴绑定：唯一事实源在 config crate（默认配置文件与
 /// 本伪设置项发射共用同一块，避免文案漂移）。有选中→复制，无选中→粘贴。
@@ -159,6 +164,10 @@ pub static SETTINGS: &[SettingSpec] = &[
     SettingSpec { key: "show_close_tab_button_in_tabs", label: "显示标签关闭按钮", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "show_tabs_in_tab_bar", label: "标签栏显示标签", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "switch_to_last_active_tab_when_closing_tab", label: "关标签时回到上个活动标签", kind: Kind::Bool, page: 3 },
+    // 伪设置项:开=保存时经 ssh::emit_format_tab_title(true) 发射彩色
+    // format-tab-title(非激活 tab 按 ANSI 亮色六色循环着色);关=发射普通版。
+    // 状态不存在于 JSON 快照,由配置 UI 以 ssh::detect_tab_colors 探测文件回填。
+    SettingSpec { key: TAB_COLOR_DISTINCT_KEY, label: "标签页按颜色区分", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "tab_and_split_indices_are_zero_based", label: "标签/面板序号从 0 开始", kind: Kind::Bool, page: 3 },
     SettingSpec { key: "launcher_alphabet", label: "启动菜单快捷字母", kind: Kind::Str, page: 3 },
     SettingSpec { key: "status_update_interval", label: "状态栏刷新间隔(ms)", kind: Kind::Int { min: 10, max: 10000 }, page: 3 },
@@ -470,6 +479,10 @@ impl SettingsForm {
                     SettingValue::Bool(true) => Some(SMART_RIGHT_CLICK_LUA.to_string()),
                     _ => None,
                 },
+                // 伪设置项：标签页着色由 save() 经 ssh::emit_format_tab_title 单独发射
+                //（与 launch_menu 同批），此处必须拦下——否则通用 Bool 分支会发射
+                // config.tab_color_distinct 未知字段，wezterm 加载配置直接报错。
+                _ if spec.key == TAB_COLOR_DISTINCT_KEY => None,
                 (Kind::Bool, SettingValue::Bool(b)) => Some(format!("config.{} = {b}\n", spec.key)),
                 (Kind::Int { .. }, SettingValue::Int(i)) => Some(format!("config.{} = {i}\n", spec.key)),
                 (Kind::Float { .. }, SettingValue::Float(f)) => {
@@ -777,6 +790,16 @@ mod tests {
         assert!(
             cfg.launch_menu[2].elevate && cfg.launch_menu[3].elevate,
             "管理员项应提权"
+        );
+        // 「标签页按颜色区分」默认开:首启模板必须带彩色 format-tab-title
+        // (含探测标记,配置界面靠它回显开关状态)
+        assert!(
+            src.contains("-- orca:tab-colors"),
+            "首启模板缺少彩色标签回调: {src}"
+        );
+        assert!(
+            !src.contains("-- orca:tab-colors-off"),
+            "首启模板不应带关闭标记: {src}"
         );
     }
 

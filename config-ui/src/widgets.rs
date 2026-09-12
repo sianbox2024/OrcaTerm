@@ -151,7 +151,7 @@ pub fn slider_value_at(slot: &SharedBounds, x: Pixels, min: f32, max: f32) -> f3
 
 // ---------- 常用等宽字体预设 ----------
 /// 常用等宽字体预设，避免扫描全系统字体（启动慢、列表太长）。
-/// 用户如需其他字体可在高级区手动填入。
+/// 预设之外的字体待「字体族」下拉扩充后提供。
 pub const COMMON_MONO_FONTS: &[&str] = &[
     "JetBrains Mono",
     "Cascadia Code",

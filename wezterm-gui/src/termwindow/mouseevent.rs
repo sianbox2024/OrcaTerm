@@ -45,12 +45,7 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_)
-            // SFTP 窗口的项只出现在其自身 ui_items;主窗口不会命中
-            | UIItemType::SftpSidebar
-            | UIItemType::SftpEntry(_)
-            | UIItemType::SftpParentDir
-            | UIItemType::SftpRefresh => {}
+            | UIItemType::Split(_) => {}
         }
     }
 
@@ -61,11 +56,7 @@ impl super::TermWindow {
             | UIItemType::AboveScrollThumb
             | UIItemType::BelowScrollThumb
             | UIItemType::ScrollThumb
-            | UIItemType::Split(_)
-            | UIItemType::SftpSidebar
-            | UIItemType::SftpEntry(_)
-            | UIItemType::SftpParentDir
-            | UIItemType::SftpRefresh => {}
+            | UIItemType::Split(_) => {}
         }
     }
 
@@ -393,11 +384,6 @@ impl super::TermWindow {
             UIItemType::CloseTab(idx) => {
                 self.mouse_event_close_tab(idx, event, context);
             }
-            // SFTP 窗口的项只出现在其自身 ui_items;主窗口不会命中
-            UIItemType::SftpSidebar
-            | UIItemType::SftpEntry(_)
-            | UIItemType::SftpParentDir
-            | UIItemType::SftpRefresh => {}
         }
     }
 
@@ -423,11 +409,34 @@ impl super::TermWindow {
             None => return,
         };
         let action = match button {
-            // 左键/右键 "+" 都弹出 launch_menu(CMD/PowerShell/SSH 连接)。
-            // 此前左键是 SpawnTab(CurrentPaneDomain)(当前域新 tab,同 Windows
-            // Terminal 惯例),但活动 tab 是 SSH 时点 "+" 会"无感直连 SSH",
-            // 用户困惑且易误连;统一走菜单,新开什么由用户显式选择。
-            MousePress::Left | MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(
+            // 左键 = 复制当前 tab:同域同程序(cmd→cmd、pwsh→pwsh、SSH→再连同一 SSH)。
+            // 域与前台进程一律取 mux 侧真实 pane——get_active_pane_or_overlay 在
+            // 启动菜单等 overlay 挂着时会给出 overlay pane,其域/进程信息都不对。
+            // SSH pane 没有本地前台进程(name=None),args 缺省即同域新连接。
+            MousePress::Left => {
+                let real_pane = Mux::get()
+                    .get_active_tab_for_window(self.mux_window_id)
+                    .and_then(|tab| tab.get_active_pane());
+                match real_pane {
+                    Some(p) => {
+                        let args = p
+                            .get_foreground_process_name(mux::pane::CachePolicy::AllowStale)
+                            .map(|path| vec![path]);
+                        Some(KeyAssignment::SpawnCommandInNewTab(
+                            config::keyassignment::SpawnCommand {
+                                domain: config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
+                                args,
+                                ..Default::default()
+                            },
+                        ))
+                    }
+                    None => Some(KeyAssignment::SpawnTab(
+                        config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
+                    )),
+                }
+            }
+            // 右键 = 弹 launch_menu(CMD/PowerShell/SSH 连接),新开什么由用户显式选择。
+            MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(
                 config::keyassignment::LauncherActionArgs {
                     flags: config::keyassignment::LauncherFlags::LAUNCH_MENU_ITEMS,
                     ..Default::default()
@@ -564,7 +573,7 @@ impl super::TermWindow {
                     // 非 SSH 标签:按钮灰色不可用,点击忽略
                     // (与 CTRL+SHIFT+F / 命令面板同一入口)
                     if self.active_pane_is_ssh() {
-                        crate::sftp_window::open_for_active_pane(self);
+                        self.launch_sftp_tool();
                     }
                 }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {

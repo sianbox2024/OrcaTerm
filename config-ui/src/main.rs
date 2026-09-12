@@ -194,8 +194,11 @@ struct ConfigUi {
     selected_binding: Option<usize>,
     edit_mods_input: Option<Entity<TextInput>>,
     edit_key_input: Option<Entity<TextInput>>,
-    edit_arg_input: Option<Entity<TextInput>>,
-    edit_action_idx: usize,
+    /// 第一步选中的动作（EDITABLE_ACTIONS 下标）；None=未选
+    edit_action: Option<usize>,
+    /// 选中绑定的动作不在快捷清单时的暂存（动作名, 参数）——未点选任何
+    /// 清单动作前，「应用修改」原样保留它，避免静默改写动作
+    custom_action: Option<(String, String)>,
     capture_mode: bool,
     // 组7 SSH 连接
     ssh_conns: Vec<SshConnection>,
@@ -207,8 +210,9 @@ struct ConfigUi {
     ssh_user_input: Option<Entity<TextInput>>,
     ssh_key_input: Option<Entity<TextInput>>,
     ssh_cmd_input: Option<Entity<TextInput>>,
-    // 高级面板与热重载
-    validate_msg: Option<String>,
+    //「SFTP 命令」草案:点标签栏 SFTP 按钮时对该连接执行的外部工具命令
+    ssh_sftp_input: Option<Entity<TextInput>>,
+    // 外部修改检测（配置文件仍可能被外部工具改动,保护未保存的表单改动）
     external_changed: bool,
     foreground_input: Option<Entity<TextInput>>,
     background_input: Option<Entity<TextInput>>,
@@ -250,8 +254,8 @@ impl ConfigUi {
             selected_binding: None,
             edit_mods_input: None,
             edit_key_input: None,
-            edit_arg_input: None,
-            edit_action_idx: 0,
+            edit_action: None,
+            custom_action: None,
             capture_mode: false,
             ssh_conns: vec![],
             baseline_ssh_conns: vec![],
@@ -262,7 +266,7 @@ impl ConfigUi {
             ssh_user_input: None,
             ssh_key_input: None,
             ssh_cmd_input: None,
-            validate_msg: None,
+            ssh_sftp_input: None,
             external_changed: false,
             foreground_input: None,
             background_input: None,
@@ -338,7 +342,6 @@ impl ConfigUi {
             self.key_search = Some(cx.new(|cx| TextInput::new("搜索键位/动作…", cx)));
             self.edit_mods_input = Some(cx.new(|cx| TextInput::new("CTRL|SHIFT", cx)));
             self.edit_key_input = Some(cx.new(|cx| TextInput::new("c", cx)));
-            self.edit_arg_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.foreground_input = Some(cx.new(|cx| TextInput::new("#ffffff", cx)));
             self.background_input = Some(cx.new(|cx| TextInput::new("#000000", cx)));
             self.cursor_color_input = Some(cx.new(|cx| TextInput::new("#ffffff", cx)));
@@ -357,6 +360,7 @@ impl ConfigUi {
             self.ssh_user_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_key_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_cmd_input = Some(cx.new(|cx| TextInput::new("", cx)));
+            self.ssh_sftp_input = Some(cx.new(|cx| TextInput::new("", cx)));
 
             // 配色组：宽松校验——空串=清除覆盖，其余原样接受（含 scheme 名称与 #十六进制）
             if let Some(e) = self.color_scheme_input.clone() {
@@ -447,18 +451,19 @@ impl ConfigUi {
                     }
                 });
             }
-            for (entity, slot) in [
-                (&self.ssh_name_input, 0usize),
-                (&self.ssh_host_input, 1),
-                (&self.ssh_port_input, 2),
-                (&self.ssh_user_input, 3),
-                (&self.ssh_key_input, 4),
-                (&self.ssh_cmd_input, 5),
+            // SSH 输入框 = 草案暂存区：不实时写回 SshConnection，仅触发重绘
+            // （私钥路径「文件存在」指示器），点「添加连接」/「应用修改」时才收集。
+            for entity in [
+                &self.ssh_name_input,
+                &self.ssh_host_input,
+                &self.ssh_port_input,
+                &self.ssh_user_input,
+                &self.ssh_key_input,
+                &self.ssh_cmd_input,
+                &self.ssh_sftp_input,
             ] {
                 if let Some(e) = entity.clone() {
-                    observe_input(&e, cx, move |this, s, _| {
-                        this.ssh_edit_field(slot, s);
-                    });
+                    observe_input(&e, cx, |_, _, cx| cx.notify());
                 }
             }
         }
@@ -500,6 +505,7 @@ impl ConfigUi {
                 self.set_input(&self.ssh_user_input, &c.username, cx);
                 self.set_input(&self.ssh_key_input, &c.key_path, cx);
                 self.set_input(&self.ssh_cmd_input, &c.initial_command, cx);
+                self.set_input(&self.ssh_sftp_input, &c.sftp_command, cx);
             }
             None => {
                 for e in [
@@ -509,6 +515,7 @@ impl ConfigUi {
                     &self.ssh_user_input,
                     &self.ssh_key_input,
                     &self.ssh_cmd_input,
+                    &self.ssh_sftp_input,
                 ] {
                     self.set_input(e, "", cx);
                 }
@@ -551,6 +558,13 @@ impl ConfigUi {
         self.ssh_conns = ssh::parse_ssh_domains(&self.snapshot);
         self.baseline_ssh_conns = self.ssh_conns.clone();
         self.selected_ssh = None;
+        // 伪设置项「标签页按颜色区分」读回：状态只体现在发射的 Lua 文本里
+        //（JSON 快照无此字段）。配置里没有任何标记（全新/历史遗留）时默认**开**
+        //——该功能的预期是开箱即见，用户可在标签栏页显式关闭（off 标记）。
+        let tab_colors = ssh::detect_tab_colors(&self.file_text).unwrap_or(true);
+        if let Some(idx) = settings::index(settings::TAB_COLOR_DISTINCT_KEY) {
+            self.form.scalars.set_bool(idx, tab_colors);
+        }
         self.sync_inputs(cx);
     }
 
@@ -562,6 +576,23 @@ impl ConfigUi {
             s.replace("local wezterm = require 'wezterm'\n", "")
         };
         let mut body = strip_wezterm_require(&self.form.to_lua(&self.baseline));
+        // 颜色字段校验：非空时必须是 #RGB/#RRGGBB/#RRGGBBAA 三种十六进制形式。
+        // 非法颜色会随 colors 块发射，主程序整个配置加载失败——「保存成功但
+        // 终端报错」比保存失败更坑，必须当场拦下。
+        for (label, v) in [
+            ("前景色", self.form.foreground.trim()),
+            ("背景色", self.form.background.trim()),
+            ("光标色", self.form.cursor_bg.trim()),
+        ] {
+            if v.is_empty() || is_valid_color(v) {
+                continue;
+            }
+            self.error = Some(format!(
+                "{label}「{v}」格式无效：应为 #RRGGBB（或 #RGB / #RRGGBBAA），留空表示跟随配色方案"
+            ));
+            cx.notify();
+            return;
+        }
         // 键绑定：与出厂默认不同才发射。文件是全量重建的，「与上次保存相同」不是跳过理由，
         // 否则后续任何不改键位的保存都会把已有的 config.keys 块抹掉（曾因此在 ssh_domains 上丢过连接）。
         if !bindings_equal(&self.bindings, &keybinds::parse_bindings(&self.baseline)) {
@@ -586,6 +617,13 @@ impl ConfigUi {
             &self.ssh_conns,
             self.form.default_prog.as_deref(),
         ));
+        // format-tab-title：「标签页按颜色区分」开=彩色版（非激活 tab 按主题
+        // ANSI 亮色六色循环着色），关=普通版。始终发射：整文件重写后回调必须
+        // 仍在，且关态会自然替换掉旧的彩色标记。
+        let tab_colors = settings::index(settings::TAB_COLOR_DISTINCT_KEY)
+            .map(|idx| self.form.scalars.bool_at(idx))
+            .unwrap_or(false);
+        body.push_str(&ssh::emit_format_tab_title(tab_colors));
         let text = format!(
             "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n\n{body}return config\n"
         );
@@ -720,7 +758,7 @@ impl ConfigUi {
                             .text_color(theme::fg_main())
                             .text_size(px(12.))
                             .cursor_pointer()
-                            .child("重置")
+                            .child("放弃改动")
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::reset)),
                     )
                     .child(
@@ -733,7 +771,7 @@ impl ConfigUi {
                             .text_color(theme::fg_main())
                             .text_size(px(12.))
                             .cursor_pointer()
-                            .child("保存")
+                            .child("保存并关闭")
                             .on_mouse_down(MouseButton::Left, cx.listener(Self::save)),
                     ),
             )
@@ -824,9 +862,8 @@ impl ConfigUi {
             .when(self.selected_group == 5, |d| d.child(self.render_setting_rows(5, cx)))
             .when(self.selected_group == 6, |d| d.child(self.render_setting_rows(6, cx)))
             .when(self.selected_group == 7, |d| d.child(self.render_keys_tab(cx)))
-            .when(self.selected_group == 8, |d| d.child(self.render_advanced_tab(cx)))
-            .when(self.selected_group == 9, |d| d.child(self.render_ssh_tab(cx)))
-            .when(self.selected_group > 9, |d| d.child(div().child("未知分组")))
+            .when(self.selected_group == 8, |d| d.child(self.render_ssh_tab(cx)))
+            .when(self.selected_group > 8, |d| d.child(div().child("未知分组")))
     }
 
     /// 注册表通用行渲染：按 kind 自动选控件（开关/分段选择/文本输入）。
@@ -977,7 +1014,7 @@ impl ConfigUi {
                     .border_color(theme::border())
                     .text_size(px(13.))
                     .text_color(theme::fg_main())
-                    .child("实时预览 (JSON)"),
+                    .child("配置文件预览 (JSON)"),
             )
             .when(self.dirty > 0, |d| {
                 d.child(
@@ -1004,56 +1041,6 @@ impl ConfigUi {
     /// 不能只渲染 TextElement——那只是纯绘制元素，交互层不进元素树会导致焦点永远无法建立。
     fn input(&self, entity: &Option<Entity<TextInput>>) -> impl IntoElement {
         entity.clone().unwrap()
-    }
-
-    /// 高级面板：原始 Lua 查看（行号）+ 语法校验 + 外部编辑器。
-    /// ponytail: 应用内多行编辑顺延——zed-1.16 无现成 textarea，自研成本高于收益；
-    /// 编辑走外部编辑器按钮（notepad），后续有需求再移植多行组件。
-    fn render_advanced_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let text = self.file_text.clone();
-        let line_count = text.lines().count();
-        let view = div().flex().flex_col().font_family("JetBrains Mono")
-            .h(px(560.)).id("lua-view").overflow_y_scroll()
-            .p_2().rounded_md()
-            .bg(theme::bg_panel())
-            .border_1().border_color(theme::border())
-            .children(text.lines().enumerate().map(|(i, line)| {
-                div().flex().gap_2()
-                    .child(
-                        div().w(px(44.)).text_size(px(11.)).text_color(theme::fg_dim())
-                            .text_right().child(format!("{}", i + 1)),
-                    )
-                    .child(
-                        div().flex_1().text_size(px(11.)).text_color(theme::fg_main())
-                            .child(line.to_string()),
-                    )
-            }));
-
-        div().flex().flex_col().gap_3()
-            .child(view)
-            .child(div().text_size(px(11.)).text_color(theme::fg_dim())
-                .child(format!("共 {line_count} 行 · 编辑请用下方外部编辑器，保存后 wezterm 热重载自动生效")))
-            .when_some(self.validate_msg.clone(), |d, msg| {
-                d.child(
-                    div().p_2().rounded_md().text_size(px(12.)).font_family("JetBrains Mono")
-                        .bg(theme::bg_elevated())
-                        .text_color(if msg.starts_with("OK") { theme::accent() } else { theme::danger() })
-                        .child(msg),
-                )
-            })
-            .child(
-                div().flex().gap_2()
-                    .child(btn("语法校验", cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.validate_msg = Some(match load_from_source(&this.file_text, &this.path) {
-                            Ok(_) => "OK 配置语法有效".to_string(),
-                            Err(e) => fmt_load_error(&e),
-                        });
-                        cx.notify();
-                    })))
-                    .child(btn("外部编辑器打开", cx.listener(|this, _: &MouseDownEvent, _, _| {
-                        let _ = std::process::Command::new("notepad.exe").arg(&this.path).spawn();
-                    }))),
-            )
     }
 
     fn render_font_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1178,15 +1165,6 @@ impl ConfigUi {
             .child(grid)
             .child(
                 div().flex().items_center().gap_2()
-                    .child(div().text_size(px(12.)).text_color(theme::fg_dim())
-                        .child("颜色表等高级覆盖："))
-                    .child(btn("打开高级编辑区", cx.listener(|this, _: &MouseDownEvent, _, cx| {
-                        this.selected_group = 8;
-                        cx.notify();
-                    }))),
-            )
-            .child(
-                div().flex().items_center().gap_2()
                     .child(div().w(px(120.)).text_size(px(13.)).text_color(theme::fg_main()).child("前景色"))
                     .child(self.input(&self.foreground_input)),
             )
@@ -1256,51 +1234,35 @@ impl ConfigUi {
     }
 }
 
-/// 键位编辑可用的 action 子集（变体名, 参数类别 0=无参 1=字符串 2=数字）。
-/// 复杂参数动作（CloseCurrentTab/SplitPane 等）不在此列，引导至高级编辑区。
-const EDITABLE_ACTIONS: &[(&str, u8)] = &[
-    ("CopyTo", 1),
-    ("PasteFrom", 1),
-    ("SpawnTab", 0),
-    ("SpawnWindow", 0),
-    ("SplitHorizontal", 0),
-    ("SplitVertical", 0),
-    ("ReloadConfiguration", 0),
-    ("ToggleFullScreen", 0),
-    ("TogglePaneZoomState", 0),
-    ("ActivateCopyMode", 0),
-    ("QuickSelect", 0),
-    ("ShowLauncher", 0),
-    ("ResetFontSize", 0),
-    ("IncreaseFontSize", 0),
-    ("DecreaseFontSize", 0),
-    ("ScrollToTop", 0),
-    ("ScrollToBottom", 0),
-    ("ActivateTabRelative", 2),
-    ("ActivateTab", 2),
-    ("MoveTabRelative", 2),
-];
-const EDITABLE_ACTION_LABELS: &[&str] = &[
-    "复制到",
-    "从...粘贴",
-    "新建标签页",
-    "新建窗口",
-    "水平分割",
-    "垂直分割",
-    "重载配置",
-    "切换全屏",
-    "切换面板缩放",
-    "激活复制模式",
-    "快速选择",
-    "显示启动器",
-    "重置字体大小",
-    "增大字体",
-    "减小字体",
-    "滚动到顶部",
-    "滚动到底部",
-    "激活相对标签页",
-    "激活标签页",
-    "移动相对标签页",
+/// 键位编辑可用的动作清单:(变体名, 预绑定参数, 界面标签)。
+/// 参数在清单里预绑定并拆成独立动作（复制到剪贴板/主选区、上一个/下一个标签页…），
+/// 界面不设参数输入框——用户流程固定为「选动作 → 录按键 → 添加」。
+/// 不在清单里的复杂动作（CloseCurrentTab/SplitPane 等）暂不支持；需要时扩充此表
+///（产品决策：配置文件由界面全量管理，不提供手写 Lua 入口）。
+const EDITABLE_ACTIONS: &[(&str, &str, &str)] = &[
+    ("CopyTo", "Clipboard", "复制到剪贴板"),
+    ("CopyTo", "PrimarySelection", "复制到主选区"),
+    ("PasteFrom", "Clipboard", "从剪贴板粘贴"),
+    ("PasteFrom", "PrimarySelection", "从主选区粘贴"),
+    ("SpawnTab", "", "新建标签页"),
+    ("SpawnWindow", "", "新建窗口"),
+    ("SplitHorizontal", "", "水平分割"),
+    ("SplitVertical", "", "垂直分割"),
+    ("ReloadConfiguration", "", "重载配置"),
+    ("ToggleFullScreen", "", "切换全屏"),
+    ("TogglePaneZoomState", "", "切换面板缩放"),
+    ("ActivateCopyMode", "", "激活复制模式"),
+    ("QuickSelect", "", "快速选择"),
+    ("ShowLauncher", "", "显示启动器"),
+    ("ResetFontSize", "", "重置字体大小"),
+    ("IncreaseFontSize", "", "增大字体"),
+    ("DecreaseFontSize", "", "减小字体"),
+    ("ScrollToTop", "", "滚动到顶部"),
+    ("ScrollToBottom", "", "滚动到底部"),
+    ("ActivateTabRelative", "-1", "上一个标签页"),
+    ("ActivateTabRelative", "1", "下一个标签页"),
+    ("MoveTabRelative", "-1", "左移标签页"),
+    ("MoveTabRelative", "1", "右移标签页"),
 ];
 
 fn bindings_equal(a: &[Binding], b: &[Binding]) -> bool {
@@ -1353,11 +1315,19 @@ fn keystroke_to_wezterm(e: &KeyDownEvent) -> (String, String) {
 }
 
 fn action_display(b: &Binding) -> String {
-    let name_cn = default_binding_action_cn(&b.action_name);
-    if b.action_arg.is_empty() {
-        name_cn
-    } else {
-        format!("{} {}", name_cn, b.action_arg)
+    match EDITABLE_ACTIONS
+        .iter()
+        .find(|(n, a, _)| *n == b.action_name && *a == b.action_arg)
+    {
+        Some((_, _, label)) => label.to_string(),
+        None => {
+            let name_cn = default_binding_action_cn(&b.action_name);
+            if b.action_arg.is_empty() {
+                name_cn
+            } else {
+                format!("{} {}", name_cn, b.action_arg)
+            }
+        }
     }
 }
 
@@ -1367,39 +1337,55 @@ impl ConfigUi {
         let b = self.bindings[i].clone();
         self.set_input(&self.edit_mods_input, &b.mods, cx);
         self.set_input(&self.edit_key_input, &b.key, cx);
-        self.set_input(&self.edit_arg_input, &b.action_arg, cx);
-        self.edit_action_idx = EDITABLE_ACTIONS
+        // 动作匹配（名称+参数）:在清单里则高亮对应项;不在（旧配置遗留的
+        // 清单外动作）暂存原样,未点选清单动作前「应用修改」不会改写它
+        match EDITABLE_ACTIONS
             .iter()
-            .position(|(n, _)| *n == b.action_name)
-            .unwrap_or(0);
+            .position(|(n, a, _)| *n == b.action_name && *a == b.action_arg)
+        {
+            Some(idx) => {
+                self.edit_action = Some(idx);
+                self.custom_action = None;
+            }
+            None => {
+                self.edit_action = None;
+                self.custom_action = Some((b.action_name.clone(), b.action_arg.clone()));
+            }
+        }
         cx.notify();
     }
 
     /// 从编辑器控件读取内容，写回选中绑定（apply=true）或追加为新绑定。
+    /// 流程固定为「选动作 → 录按键 → 添加/应用」；动作参数在清单里预绑定，
+    /// 无参数框。所有字段先规范化校验，失败在顶部错误横幅给出一句话原因——
+    /// 绝不静默无效。
     fn commit_editor(&mut self, apply: bool, cx: &mut Context<Self>) {
         let read = |e: &Option<Entity<TextInput>>| {
             e.as_ref().map(|e| e.read(cx).content.to_string()).unwrap_or_default()
         };
-        let mods = norm_or_raw(&read(&self.edit_mods_input));
-        let key = read(&self.edit_key_input).trim().to_string();
-        let arg = read(&self.edit_arg_input);
-        let (name, kind) = EDITABLE_ACTIONS
-            .get(self.edit_action_idx)
-            .cloned()
-            .unwrap_or(("CopyTo", 1));
-        if key.is_empty() {
-            return;
-        }
-        // 参数校验：数字动作必须能解析为整数；无参动作忽略参数
-        let arg = match kind {
-            0 => String::new(),
-            2 => match arg.trim().parse::<i64>() {
-                Ok(v) => v.to_string(),
-                Err(_) => return,
-            },
-            _ => arg,
+        let fail = |this: &mut Self, msg: String, cx: &mut Context<Self>| {
+            this.error = Some(format!("键位编辑：{msg}"));
+            cx.notify();
         };
-        let b = Binding { mods, key, action_name: name.into(), action_arg: arg };
+        let (name, arg) = if let Some((n, a)) = self.custom_action.clone() {
+            (n, a)
+        } else if let Some(idx) = self.edit_action {
+            let (n, a, _) = EDITABLE_ACTIONS[idx];
+            (n.to_string(), a.to_string())
+        } else {
+            return fail(self, "请先在第一步选择动作".into(), cx);
+        };
+        let mods = match normalize_mods(&read(&self.edit_mods_input)) {
+            Ok(m) => m,
+            Err(token) => {
+                return fail(self, format!("无法识别的修饰键「{token}」（可用 CTRL/SHIFT/ALT/SUPER，分隔符用 + 或 |，或点「录入按键」）"), cx);
+            }
+        };
+        let key = match normalize_key(&read(&self.edit_key_input)) {
+            Ok(k) => k,
+            Err(msg) => return fail(self, msg, cx),
+        };
+        let b = Binding { mods, key, action_name: name, action_arg: arg };
         if apply {
             if let Some(i) = self.selected_binding {
                 if i < self.bindings.len() {
@@ -1412,6 +1398,7 @@ impl ConfigUi {
             self.selected_binding = Some(self.bindings.len() - 1);
             self.dirty += 1;
         }
+        self.error = None;
         cx.notify();
     }
 
@@ -1425,65 +1412,28 @@ impl ConfigUi {
         }
     }
 
-    /// SSH 编辑输入 → 选中连接的字段写入。slot：0=名称 1=主机 2=端口 3=用户 4=私钥 5=连接后命令。
-    /// 端口解析失败时忽略本次输入（保留旧值），不打断打字。
-    fn ssh_edit_field(&mut self, slot: usize, s: &str) {
-        let Some(i) = self.selected_ssh else { return };
-        if i >= self.ssh_conns.len() {
-            return;
-        }
-        let c = &mut self.ssh_conns[i];
-        let changed = match slot {
-            0 => {
-                if c.name != s {
-                    c.name = s.to_string();
-                    true
-                } else {
-                    false
-                }
-            }
-            1 => {
-                if c.host != s {
-                    c.host = s.to_string();
-                    true
-                } else {
-                    false
-                }
-            }
-            2 => match s.trim().parse::<u16>() {
-                Ok(p) if p != c.port => {
-                    c.port = p;
-                    true
-                }
-                _ => false,
-            },
-            3 => {
-                if c.username != s {
-                    c.username = s.to_string();
-                    true
-                } else {
-                    false
-                }
-            }
-            5 => {
-                if c.initial_command != s {
-                    c.initial_command = s.to_string();
-                    true
-                } else {
-                    false
-                }
-            }
-            _ => {
-                if c.key_path != s {
-                    c.key_path = s.to_string();
-                    true
-                } else {
-                    false
-                }
-            }
+    /// 从编辑器输入框收集一条连接草案：名称留空自动命名，端口解析失败回退 22。
+    /// 输入框只是暂存区，是否入列由调用方决定（添加=新条目，应用=写回选中）。
+    fn ssh_conn_from_editor(&self, cx: &App) -> SshConnection {
+        let text = |slot: &Option<Entity<TextInput>>| {
+            slot.as_ref()
+                .map(|e| e.read(cx).content.trim().to_string())
+                .unwrap_or_default()
         };
-        if changed {
-            self.dirty += 1;
+        let name = text(&self.ssh_name_input);
+        let name = if name.is_empty() {
+            format!("连接{}", self.ssh_conns.len() + 1)
+        } else {
+            name
+        };
+        SshConnection {
+            name,
+            host: text(&self.ssh_host_input),
+            port: text(&self.ssh_port_input).parse::<u16>().unwrap_or(22),
+            username: text(&self.ssh_user_input),
+            key_path: text(&self.ssh_key_input),
+            initial_command: text(&self.ssh_cmd_input),
+            sftp_command: text(&self.ssh_sftp_input),
         }
     }
 
@@ -1499,55 +1449,45 @@ impl ConfigUi {
         self.set_input(&self.ssh_user_input, &c.username, cx);
         self.set_input(&self.ssh_key_input, &c.key_path, cx);
         self.set_input(&self.ssh_cmd_input, &c.initial_command, cx);
+        self.set_input(&self.ssh_sftp_input, &c.sftp_command, cx);
         cx.notify();
     }
 
     fn add_ssh(&mut self, cx: &mut Context<Self>) {
-        // 先填后加：未选中连接时，编辑框里已填的内容直接带入新连接；
-        // 有选中连接时内容已实时同步到该连接，新连接保持空白避免整份复制
-        let draft = self.selected_ssh.is_none();
-        let (name, host, port, username, key_path, initial_command) = if draft {
-            let text = |slot: &Option<Entity<TextInput>>| {
-                slot.as_ref()
-                    .map(|e| e.read(cx).content.trim().to_string())
-                    .unwrap_or_default()
-            };
-            let name = text(&self.ssh_name_input);
-            let name = if name.is_empty() {
-                format!("连接{}", self.ssh_conns.len() + 1)
-            } else {
-                name
-            };
-            let port = text(&self.ssh_port_input).parse::<u16>().unwrap_or(22);
-            (
-                name,
-                text(&self.ssh_host_input),
-                port,
-                text(&self.ssh_user_input),
-                text(&self.ssh_key_input),
-                text(&self.ssh_cmd_input),
-            )
-        } else {
-            (
-                format!("连接{}", self.ssh_conns.len() + 1),
-                String::new(),
-                22,
-                String::new(),
-                String::new(),
-                String::new(),
-            )
-        };
-        self.ssh_conns.push(SshConnection {
-            name,
-            host,
-            port,
-            username,
-            key_path,
-            initial_command,
-        });
+        // 先填后加：编辑器内容作为草案，点「添加连接」才入列为新连接
+        let conn = self.ssh_conn_from_editor(cx);
+        self.ssh_conns.push(conn);
         let i = self.ssh_conns.len() - 1;
         self.dirty += 1;
         self.select_ssh(i, cx);
+    }
+
+    /// 编辑器草案写回选中的连接（「应用修改」按钮）。
+    fn apply_ssh(&mut self, cx: &mut Context<Self>) {
+        let Some(i) = self.selected_ssh else { return };
+        if i >= self.ssh_conns.len() {
+            return;
+        }
+        self.ssh_conns[i] = self.ssh_conn_from_editor(cx);
+        self.dirty += 1;
+        self.select_ssh(i, cx);
+    }
+
+    /// 清空编辑器并取消选中，回到「填写新连接」草案态。
+    fn new_ssh(&mut self, cx: &mut Context<Self>) {
+        self.selected_ssh = None;
+        for e in [
+            &self.ssh_name_input,
+            &self.ssh_host_input,
+            &self.ssh_user_input,
+            &self.ssh_key_input,
+            &self.ssh_cmd_input,
+            &self.ssh_sftp_input,
+        ] {
+            self.set_input(e, "", cx);
+        }
+        self.set_input(&self.ssh_port_input, "22", cx);
+        cx.notify();
     }
 
     /// 弹出系统文件选择框选 SSH 私钥文件，结果写回私钥路径输入框。
@@ -1584,26 +1524,27 @@ impl ConfigUi {
                 for e in [
                     &self.ssh_name_input,
                     &self.ssh_host_input,
-                    &self.ssh_port_input,
                     &self.ssh_user_input,
                     &self.ssh_key_input,
                     &self.ssh_cmd_input,
+                    &self.ssh_sftp_input,
                 ] {
                     self.set_input(e, "", cx);
                 }
+                self.set_input(&self.ssh_port_input, "22", cx);
                 cx.notify();
             }
         }
     }
 
-    /// 选中连接的私钥路径状态：""=未填（不显示标识）"ok"=存在 "bad"=不存在
-    fn ssh_selected_key_exists(&self) -> &'static str {
-        let Some(i) = self.selected_ssh else { return "" };
-        let Some(c) = self.ssh_conns.get(i) else { return "" };
-        if c.key_path.trim().is_empty() {
+    /// 编辑器草案里私钥路径的状态：""=未填（不显示标识） "ok"=存在 "bad"=不存在
+    fn ssh_editor_key_state(&self, cx: &App) -> &'static str {
+        let Some(e) = &self.ssh_key_input else { return "" };
+        let path = e.read(cx).content.trim();
+        if path.is_empty() {
             return "";
         }
-        if std::path::Path::new(c.key_path.trim()).is_file() {
+        if std::path::Path::new(path).is_file() {
             "ok"
         } else {
             "bad"
@@ -1643,12 +1584,12 @@ impl ConfigUi {
         if conns.is_empty() {
             list = list.child(
                 div().text_size(px(11.)).text_color(theme::fg_dim())
-                    .child("尚无连接，点击右侧「添加连接」"),
+                    .child("尚无连接，在右侧填写后点「添加连接」"),
             );
         }
 
         let has_sel = selected.is_some();
-        let key_state = self.ssh_selected_key_exists();
+        let key_state = self.ssh_editor_key_state(cx);
         let editor = div().flex_1().min_w_0().flex().flex_col().gap_2()
             .p_2().rounded_md().bg(theme::bg_panel())
             .border_1().border_color(theme::border())
@@ -1693,11 +1634,22 @@ impl ConfigUi {
                     .child(self.input(&self.ssh_cmd_input)),
             )
             .child(
+                div().flex().items_center().gap_2()
+                    .child(lbl("SFTP 命令"))
+                    .child(self.input(&self.ssh_sftp_input)),
+            )
+            .child(
                 div().flex().gap_2()
                     .child(btn("添加连接", cx.listener(|this, _: &MouseDownEvent, _, cx| this.add_ssh(cx))))
                     .when(has_sel, |d| {
-                        d.child(btn("删除选中", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_ssh(cx))))
+                        d.child(btn("新建", cx.listener(|this, _: &MouseDownEvent, _, cx| this.new_ssh(cx))))
+                            .child(btn("应用修改", cx.listener(|this, _: &MouseDownEvent, _, cx| this.apply_ssh(cx))))
+                            .child(btn("删除选中", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_ssh(cx))))
                     }),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("新增：先在上方填写各项，点「添加连接」才入列；修改：选中连接 → 改字段 → 点「应用修改」；「新建」清空编辑器重新填写。"),
             )
             .child(
                 div().text_size(px(11.)).text_color(theme::fg_dim())
@@ -1706,6 +1658,10 @@ impl ConfigUi {
             .child(
                 div().text_size(px(11.)).text_color(theme::fg_dim())
                     .child("连接后命令（可选）：登录后自动执行，如 cd /data/project；执行完进入交互 shell，命令失败也会正常进入。"),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("SFTP 命令（可选）：点终端标签栏 SFTP 按钮时执行的外部工具命令，如 \"D:\\Program Files (x86)\\WinSCP\\WinSCP.exe\" \"会话名\" /newinstance；留空=按钮提示未配置。"),
             );
 
         div().flex().flex_col().gap_3()
@@ -1768,8 +1724,14 @@ impl ConfigUi {
         }
         list = list.child(
             div().mt_2().text_size(px(11.)).text_color(theme::fg_dim())
-                .child("── 默认键位（常用，只读；完整列表见高级编辑区） ──"),
+                .child("── 默认键位（常用，只读） ──"),
         );
+        if bindings.is_empty() {
+            list = list.child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("尚无自定义键位：在下方编辑器填写按键、选动作后，点「新增绑定」入列。"),
+            );
+        }
         for (dm, dk, dact) in keybinds::DEFAULT_BINDINGS {
             if !row_matches(dm, dk, dact) {
                 continue;
@@ -1794,6 +1756,11 @@ impl ConfigUi {
 
         // 编辑器面板：无选中时提示；有选中时显示字段 + 应用/删除
         let capture_label = if self.capture_mode { "请按下组合键… (Esc 取消)" } else { "录入按键" };
+        // 编辑器三步布局（用户直觉流程）：①选动作 → ②录按键 → ③添加。
+        // 步骤标号直接写在界面上，不需要说明书也能看懂顺序。
+        let step_label = |text: &str| {
+            div().text_size(px(11.)).text_color(theme::fg_dim()).child(text.to_string())
+        };
         let editor = div().flex().flex_col().gap_2()
             .p_2().rounded_md()
             .bg(theme::bg_panel())
@@ -1809,6 +1776,33 @@ impl ConfigUi {
                     cx.notify();
                 }))
             })
+            .child(step_label("第一步：选择动作"))
+            .child(
+                div().flex().flex_wrap().gap_1().children(
+                    EDITABLE_ACTIONS.iter().enumerate().map(|(idx, (_, _, label))| {
+                        let entity = cx.entity();
+                        let is_sel = !self.custom_action.is_some() && self.edit_action == Some(idx);
+                        div().px_2().py_0p5().rounded_sm().cursor_pointer().text_size(px(11.))
+                            .when(is_sel, |d| d.bg(theme::accent_dim()).text_color(theme::fg_main()))
+                            .when(!is_sel, |d| d.bg(theme::bg_elevated()).text_color(theme::fg_dim()))
+                            .child(*label)
+                            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                                entity.update(app, |state: &mut ConfigUi, cx| {
+                                    state.edit_action = Some(idx);
+                                    state.custom_action = None;
+                                    cx.notify();
+                                });
+                            })
+                    }),
+                ),
+            )
+            .when_some(self.custom_action.clone(), |d, ca: (String, String)| {
+                d.child(
+                    div().text_size(px(11.)).text_color(theme::fg_dim())
+                        .child(format!("当前选中行的动作「{}」不在上方清单里，点选任一动作会覆盖它", ca.0)),
+                )
+            })
+            .child(step_label("第二步：录入按键（点按钮后直接按组合键）"))
             .child(
                 div().flex().items_center().gap_2()
                     .child(lbl("修饰键"))
@@ -1826,33 +1820,16 @@ impl ConfigUi {
                             })),
                     ),
             )
-            .child(
-                div().flex().flex_wrap().gap_1().children(
-                    EDITABLE_ACTIONS.iter().enumerate().zip(EDITABLE_ACTION_LABELS.iter()).map(|((idx, (name, _)), label)| {
-                        let entity = cx.entity();
-                        div().px_2().py_0p5().rounded_sm().cursor_pointer().text_size(px(11.))
-                            .when(self.edit_action_idx == idx, |d| d.bg(theme::accent_dim()).text_color(theme::fg_main()))
-                            .when(self.edit_action_idx != idx, |d| d.bg(theme::bg_elevated()).text_color(theme::fg_dim()))
-                            .child(*label)
-                            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
-                                entity.update(app, |state: &mut ConfigUi, cx| {
-                                    state.edit_action_idx = idx;
-                                    cx.notify();
-                                });
-                            })
-                    }),
-                ),
-            )
-            .child(
-                div().flex().items_center().gap_2()
-                    .child(lbl("参数"))
-                    .child(self.input(&self.edit_arg_input)),
-            )
+            .child(step_label("第三步：添加（或先在上方列表选中一行后修改/删除）"))
             .child(
                 div().flex().gap_2()
-                    .child(btn("应用修改", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(true, cx))))
-                    .child(btn("删除此绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_binding(cx))))
-                    .child(btn("新增绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(false, cx)))),
+                    // 与 SSH 连接页同一交互模型:未选中行时不显示「应用修改/
+                    // 删除此绑定」——无选中时它们没有可写回的目标。
+                    .when(selected.is_some(), |d| {
+                        d.child(btn("应用修改", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(true, cx))))
+                            .child(btn("删除此绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_binding(cx))))
+                    })
+                    .child(btn("添加键绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(false, cx)))),
             );
 
         div().flex().flex_col().gap_3()
@@ -1882,6 +1859,16 @@ fn lbl(text: &str) -> impl IntoElement {
     div().w(px(60.)).text_size(px(12.)).text_color(theme::fg_main()).child(text.to_string())
 }
 
+/// 颜色字面量校验：#RGB / #RRGGBB / #RRGGBBAA，或纯字母的命名色
+/// （wezterm 接受 X11 颜色名，如 red/tomato）。裸十六进制、符号、
+/// 中文等无法确认有效的形式拦下——它们会发射非法 Lua 使配置加载失败。
+fn is_valid_color(s: &str) -> bool {
+    if let Some(hex) = s.strip_prefix('#') {
+        return matches!(hex.len(), 3 | 6 | 8) && hex.chars().all(|c| c.is_ascii_hexdigit());
+    }
+    !s.is_empty() && s.len() <= 30 && s.chars().all(|c| c.is_ascii_alphabetic())
+}
+
 /// Int/Float/Str/List 类设置用文本输入；Bool 用开关、Enum 用分段选择渲染。
 fn setting_kind_needs_input(kind: Kind) -> bool {
     matches!(kind, Kind::Int { .. } | Kind::Float { .. } | Kind::Str | Kind::List)
@@ -1895,8 +1882,69 @@ fn btn(text: &str, listener: impl Fn(&MouseDownEvent, &mut Window, &mut gpui::Ap
         .on_mouse_down(MouseButton::Left, move |e, w, app| listener(e, w, app))
 }
 
-fn norm_or_raw(s: &str) -> String {
-    s.trim().to_string()
+/// 修饰键自由文本 → 规范形式（分隔符 + / | 皆可，令牌大小写不敏感）。
+/// 无法识别的令牌返回 Err(原文)，绝不让垃圾文本写进配置（否则快捷键永不生效）。
+fn normalize_mods(s: &str) -> Result<String, String> {
+    let mut parts: Vec<&'static str> = vec![];
+    for token in s.split(['|', '+']) {
+        let t = token.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let canonical = match t.to_ascii_lowercase().as_str() {
+            "ctrl" | "control" => "CTRL",
+            "shift" => "SHIFT",
+            "alt" | "option" | "opt" => "ALT",
+            "super" | "cmd" | "command" | "win" | "windows" | "meta" => "SUPER",
+            other => return Err(other.to_string()),
+        };
+        if !parts.contains(&canonical) {
+            parts.push(canonical);
+        }
+    }
+    Ok(parts.join("|"))
+}
+
+/// 键名自由文本 → 规范形式：常见特殊键大小写不敏感映射（含录入器产出的
+/// gpui 小写名与用户手输的变体），F1-F24 规范大小写；其余原样保留。
+/// 含空白或非 ASCII（如中文）直接报错——这类值写进配置后快捷键永不生效。
+fn normalize_key(s: &str) -> Result<String, String> {
+    let t = s.trim();
+    if t.is_empty() {
+        return Err("键名为空，请填写或点「录入按键」按物理组合键录入".into());
+    }
+    if t.chars().any(|c| c.is_whitespace() || !c.is_ascii()) {
+        return Err(format!("键名「{t}」无法识别，请点「录入按键」按物理组合键录入"));
+    }
+    let lower = t.to_ascii_lowercase();
+    let canonical = match lower.as_str() {
+        "left" | "leftarrow" => "LeftArrow",
+        "right" | "rightarrow" => "RightArrow",
+        "up" | "uparrow" => "UpArrow",
+        "down" | "downarrow" => "DownArrow",
+        "enter" | "return" => "Enter",
+        "escape" | "esc" => "Escape",
+        "space" => "Space",
+        "tab" => "Tab",
+        "backspace" => "Backspace",
+        "delete" | "del" => "Delete",
+        "insert" | "ins" => "Insert",
+        "home" => "Home",
+        "end" => "End",
+        "pageup" | "pgup" => "PageUp",
+        "pagedown" | "pgdn" => "PageDown",
+        other => {
+            if let Some(n) = other.strip_prefix('f') {
+                if let Ok(num) = n.parse::<u32>() {
+                    if (1..=24).contains(&num) {
+                        return Ok(format!("F{num}"));
+                    }
+                }
+            }
+            return Ok(t.to_string());
+        }
+    };
+    Ok(canonical.to_string())
 }
 
 #[cfg(test)]
@@ -1919,11 +1967,44 @@ mod tests {
         assert_eq!(mods.split('|').collect::<Vec<_>>().len(), 2);
         assert_eq!(key, "c");
     }
+
+    #[test]
+    fn normalize_mods_canonicalizes_free_text() {
+        assert_eq!(normalize_mods("alt").unwrap(), "ALT");
+        assert_eq!(normalize_mods("ctrl+shift").unwrap(), "CTRL|SHIFT");
+        assert_eq!(normalize_mods("CTRL | SHIFT").unwrap(), "CTRL|SHIFT");
+        assert_eq!(normalize_mods("win").unwrap(), "SUPER");
+        assert_eq!(normalize_mods("").unwrap(), "");
+        assert!(normalize_mods("向右").is_err());
+    }
+
+    #[test]
+    fn normalize_key_canonicalizes_free_text() {
+        assert_eq!(normalize_key("right").unwrap(), "RightArrow");
+        assert_eq!(normalize_key("RightArrow").unwrap(), "RightArrow");
+        assert_eq!(normalize_key("esc").unwrap(), "Escape");
+        assert_eq!(normalize_key("f12").unwrap(), "F12");
+        assert_eq!(normalize_key("c").unwrap(), "c");
+        assert!(normalize_key("").is_err());
+        assert!(normalize_key("向右").is_err());
+    }
+
+    #[test]
+    fn color_validation_accepts_wezterm_forms() {
+        assert!(is_valid_color("#1b1d2e"));
+        assert!(is_valid_color("#fff"));
+        assert!(is_valid_color("#1b1d2e80"));
+        assert!(is_valid_color("red"));
+        assert!(!is_valid_color(""));
+        assert!(!is_valid_color("1b1d2e"));
+        assert!(!is_valid_color("#xyz"));
+        assert!(!is_valid_color("红色"));
+    }
 }
 
 const GROUPS: &[&str] = &[
     "字体与光标", "配色", "窗口外观", "标签栏", "启动与默认行为", "终端行为", "鼠标与选择",
-    "键绑定", "高级", "SSH 连接",
+    "键绑定", "SSH 连接",
 ];
 
 impl Render for ConfigUi {

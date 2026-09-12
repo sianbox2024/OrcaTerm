@@ -10,16 +10,13 @@ use serde_json::Value;
 
 use crate::settings::{lua_quote, SettingsForm};
 
-/// 计算基线快照：剥离标记区后（用户自有配置）经真实读链路解析出的生效值，
-/// 作为 `to_lua` 的 diff 基准——避免把用户已有设置误判为「默认」而重复发射，
-/// 也避免用出厂默认钉死 scheme 解析出的调色板。无标记时整个文件即基线；
-/// 标记区损坏按未迁移处理；加载失败退化为空对象。
+/// 计算基线快照：整个文件经真实读链路解析出的生效值，作为 `to_lua` 的 diff
+/// 基准——避免把用户已有设置误判为「默认」而重复发射，也避免用出厂默认
+/// 钉死 scheme 解析出的调色板。文件为 GUI 全量所有权（历史遗留的标记区
+/// 内容同样计入基线；保存时整文件重写，区外内容不再有存续概念）。
+/// 加载失败退化为空对象。
 pub fn baseline_snapshot(file_text: &str, display_path: &Path) -> Value {
-    let text = match crate::markers::split(file_text) {
-        Ok(Some(s)) => format!("{}{}", s.before, s.after),
-        _ => file_text.to_string(),
-    };
-    match crate::load::load_from_source(&text, display_path) {
+    match crate::load::load_from_source(file_text, display_path) {
         Ok(loaded) => {
             let json = crate::load::config_to_json(&loaded.config);
             if json.is_null() {
@@ -376,20 +373,6 @@ mod tests {
             back.scalars.str_at(crate::settings::index("default_cwd").unwrap()),
             r"C:\Users\testuser\notes dir"
         );
-    }
-
-    #[test]
-    fn baseline_snapshot_resolves_out_of_marker_values() {
-        let text = concat!(
-            "local config = {}\n",
-            "-- <orca-gui-config-start>\n",
-            "config.font_size = 16\n",
-            "-- <orca-gui-config-end>\n",
-            "config.font_size = 14\n",
-            "return config\n",
-        );
-        let base = baseline_snapshot(text, std::path::Path::new("t.lua"));
-        assert_eq!(base.get("font_size").and_then(|v| v.as_f64()), Some(14.0), "标记区内设置不得进入基线");
     }
 
     #[test]

@@ -81,13 +81,10 @@ mod prevcursor;
 pub mod render;
 pub mod resize;
 mod selection;
-pub(crate) mod sftp_panel;
-pub(crate) mod sftp_transfer;
 pub mod spawn;
 pub mod webgpu;
 use crate::spawn::SpawnWhere;
 use prevcursor::PrevCursorPos;
-use sftp_panel::{SFTP_WINDOW_HEIGHT, SFTP_WINDOW_WIDTH};
 
 const ATLAS_SIZE: usize = 128;
 
@@ -245,14 +242,6 @@ pub enum UIItemType {
     ScrollThumb,
     BelowScrollThumb,
     Split(PositionedSplit),
-    /// SFTP 窗口列表整体区域(空白点击/滚轮)
-    SftpSidebar,
-    /// SFTP 窗口条目行;usize = entries 索引
-    SftpEntry(usize),
-    /// SFTP 窗口「上级目录」按钮
-    SftpParentDir,
-    /// SFTP 窗口「刷新」按钮
-    SftpRefresh,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -693,145 +682,6 @@ impl TermWindow {
 }
 
 impl TermWindow {
-    /// SFTP 独立窗口的渲染宿主构造:与 new_window 的区别 =
-    /// 不挂 mux 窗口、无 tab bar、无背景图,后续由 sftp_window.rs
-    /// 自行 new_window 创建 OS 窗口并 created() 装 GL。
-    pub async fn new_sftp_host() -> anyhow::Result<Self> {
-        let config = configuration();
-        let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
-        let fontconfig = Rc::new(FontConfiguration::new(Some(config.clone()), dpi)?);
-        let render_metrics = RenderMetrics::new(&fontconfig)?;
-
-        let terminal_size = TerminalSize {
-            rows: 0,
-            cols: 0,
-            pixel_width: SFTP_WINDOW_WIDTH as usize,
-            pixel_height: SFTP_WINDOW_HEIGHT as usize,
-            dpi: dpi as u32,
-        };
-        let dimensions = Dimensions {
-            pixel_width: SFTP_WINDOW_WIDTH as usize,
-            pixel_height: SFTP_WINDOW_HEIGHT as usize,
-            dpi,
-        };
-        let connection_name = Connection::get().unwrap().name();
-
-        Ok(Self {
-            created: Instant::now(),
-            connection_name,
-            last_fps_check_time: Instant::now(),
-            num_frames: 0,
-            last_frame_duration: Duration::ZERO,
-            fps: 0.,
-            config_subscription: None,
-            os_parameters: None,
-            gl: None,
-            webgpu: None,
-            window: None,
-            window_background: vec![],
-            config: config.clone(),
-            config_overrides: wezterm_dynamic::Value::default(),
-            palette: None,
-            focused: None,
-            mux_window_id: 0,
-            mux_window_id_for_subscriptions: Arc::new(Mutex::new(0)),
-            mux_subscription_dead: Arc::new(AtomicBool::new(true)),
-            fonts: Rc::clone(&fontconfig),
-            render_metrics,
-            dimensions,
-            window_state: WindowState::default(),
-            resizes_pending: 0,
-            is_repaint_pending: false,
-            pending_scale_changes: LinkedList::new(),
-            terminal_size,
-            render_state: None,
-            input_map: InputMap::new(&config),
-            leader_is_down: None,
-            dead_key_status: DeadKeyStatus::None,
-            show_tab_bar: false,
-            show_scroll_bar: false,
-            tab_bar: TabBarState::default(),
-            fancy_tab_bar: None,
-            right_status: String::new(),
-            left_status: String::new(),
-            last_mouse_coords: (0, -1),
-            window_drag_position: None,
-            current_mouse_event: None,
-            current_modifier_and_leds: Default::default(),
-            prev_cursor: PrevCursorPos::new(),
-            last_scroll_info: RenderableDimensions::default(),
-            tab_state: RefCell::new(HashMap::new()),
-            pane_state: RefCell::new(HashMap::new()),
-            current_mouse_buttons: vec![],
-            current_mouse_capture: None,
-            last_mouse_click: None,
-            current_highlight: None,
-            quad_generation: 0,
-            shape_generation: 0,
-            shape_cache: RefCell::new(LfuCache::new(
-                "shape_cache.hit.rate",
-                "shape_cache.miss.rate",
-                |config| config.shape_cache_size,
-                &config,
-            )),
-            line_state_cache: RefCell::new(LfuCacheU64::new(
-                "line_state_cache.hit.rate",
-                "line_state_cache.miss.rate",
-                |config| config.line_state_cache_size,
-                &config,
-            )),
-            next_line_state_id: 0,
-            line_quad_cache: RefCell::new(LfuCache::new(
-                "line_quad_cache.hit.rate",
-                "line_quad_cache.miss.rate",
-                |config| config.line_quad_cache_size,
-                &config,
-            )),
-            line_to_ele_shape_cache: RefCell::new(LfuCache::new(
-                "line_to_ele_shape_cache.hit.rate",
-                "line_to_ele_shape_cache.miss.rate",
-                |config| config.line_to_ele_shape_cache_size,
-                &config,
-            )),
-            last_status_call: Instant::now(),
-            cursor_blink_state: RefCell::new(ColorEase::new(
-                config.cursor_blink_rate,
-                config.cursor_blink_ease_in,
-                config.cursor_blink_rate,
-                config.cursor_blink_ease_out,
-                None,
-            )),
-            blink_state: RefCell::new(ColorEase::new(
-                config.text_blink_rate,
-                config.text_blink_ease_in,
-                config.text_blink_rate,
-                config.text_blink_ease_out,
-                None,
-            )),
-            rapid_blink_state: RefCell::new(ColorEase::new(
-                config.text_blink_rate_rapid,
-                config.text_blink_rapid_ease_in,
-                config.text_blink_rate_rapid,
-                config.text_blink_rapid_ease_out,
-                None,
-            )),
-            event_states: HashMap::new(),
-            current_event: None,
-            has_animation: RefCell::new(None),
-            scheduled_animation: RefCell::new(None),
-            allow_images: AllowImage::Yes,
-            semantic_zones: HashMap::new(),
-            ui_items: vec![],
-            dragging: None,
-            last_ui_item: None,
-            copy_button_feedback: None,
-            is_click_to_focus_window: false,
-            key_table_state: KeyTableState::default(),
-            modal: RefCell::new(None),
-            opengl_info: None,
-        })
-    }
-
     pub async fn new_window(mux_window_id: MuxWindowId) -> anyhow::Result<()> {
         let config = configuration();
         let dpi = config.dpi.unwrap_or_else(|| ::window::default_dpi()) as usize;
@@ -1398,6 +1248,10 @@ impl TermWindow {
                 window.invalidate();
                 if let Some(tx) = tx {
                     tx.try_send(result).ok();
+                } else if let Err(err) = result {
+                    // tx 为 None 时错误原本被整个丢弃（launcher 等调用方），
+                    // 菜单点击失败表现为「无反应」且日志无线索，必须落日志。
+                    log::error!("perform assignment failed: {:#}", err);
                 }
             }
             TermWindowNotif::SetRightStatus(status) => {
@@ -2092,6 +1946,13 @@ impl TermWindow {
             &self.render_metrics,
         );
 
+        // 经典标签栏的 TabBarState(含 format-tab-title 的着色结果)只在
+        // update_title_impl 里重建,而本函数此前从不触发它——配置热重载后
+        // 标签栏沿用旧缓存,format-tab-title 的改动(如「标签页按颜色区分」)
+        // 对已存在的窗口不生效,重启才可见。花式标签栏上方已 take() 重建,
+        // 经典栏补上同等的强制重建。
+        self.update_title();
+
         self.invalidate_modal();
         self.emit_window_event("window-config-reloaded", None);
     }
@@ -2729,16 +2590,18 @@ impl TermWindow {
             None => return,
         };
 
-        let pane = match self.get_active_pane_or_overlay() {
+        // pane_id 必须取 mux 侧 tab 的真实活动 pane,不能用 get_active_pane_or_overlay():
+        // 弹菜单前若还挂着上一个 overlay(启动菜单/上一次菜单),记录的就是旧 overlay
+        // 的 pane id,而下面 assign_overlay 会先销毁它——用户点击时 pane 已不存在,
+        // PerformAssignment 报 "pane id N is not valid",动作被静默丢弃(表现为
+        // 点了没反应,重开一次菜单才好)。
+        let real_pane = match tab.get_active_pane() {
             Some(pane) => pane,
             None => return,
         };
 
-        let domain_id_of_current_pane = tab
-            .get_active_pane()
-            .expect("tab has no panes!")
-            .domain_id();
-        let pane_id = pane.pane_id();
+        let domain_id_of_current_pane = real_pane.domain_id();
+        let pane_id = real_pane.pane_id();
         let tab_id = tab.tab_id();
         let title = args.title.unwrap();
         let flags = args.flags;
@@ -3110,7 +2973,7 @@ impl TermWindow {
             ShowTabNavigator => self.show_tab_navigator(),
             ShowDebugOverlay => self.show_debug_overlay(),
             ShowLauncher => self.show_launcher(),
-            ToggleSftpPanel => crate::sftp_window::open_for_active_pane(self),
+            ToggleSftpPanel => self.launch_sftp_tool(),
             ShowLauncherArgs(args) => {
                 let title = args.title.clone().unwrap_or("Launcher".to_string());
                 let args = LauncherActionArgs {
@@ -3755,13 +3618,53 @@ impl TermWindow {
     /// 当前活动 pane 是否为直连 SSH(SftpPanelButton 灰化判断:
     /// 非 SSH 标签时按钮灰色且点击无效)
     pub fn active_pane_is_ssh(&self) -> bool {
-        let Some(pane) = self.get_active_pane_or_overlay() else {
+        // 取 mux 侧真实 pane:启动菜单等 overlay 挂着时
+        // get_active_pane_or_overlay 给出的是 overlay pane(本地域),
+        // 会把 SSH 误判为非 SSH(按钮错误灰化、点击被吞)。
+        let mux = Mux::get();
+        let pane = mux
+            .get_active_tab_for_window(self.mux_window_id)
+            .and_then(|tab| tab.get_active_pane());
+        let Some(pane) = pane else {
             return false;
         };
-        let mux = Mux::get();
         mux.get_domain(pane.domain_id())
             .map(|domain| domain.downcast_ref::<mux::ssh::RemoteSshDomain>().is_some())
             .unwrap_or(false)
+    }
+
+    /// SFTP 按钮/CTRL+SHIFT+F:拉起该 SSH 连接配置的外部 SFTP 工具命令
+    /// (如 WinSCP:"D:\Program Files (x86)\WinSCP\WinSCP.exe" "会话名" /Desktop)。
+    /// 产品决策:SFTP 功能由第三方工具承担,自研窗口已移除。
+    /// 命令在配置界面每个 SSH 连接的「SFTP 命令」里填写;未配置时 toast 提示。
+    pub fn launch_sftp_tool(&mut self) {
+        // 域判定取 mux 侧真实 pane(与 active_pane_is_ssh 同源,规避 overlay 陷阱)
+        let mux = Mux::get();
+        let domain_name = mux
+            .get_active_tab_for_window(self.mux_window_id)
+            .and_then(|tab| tab.get_active_pane())
+            .and_then(|pane| mux.get_domain(pane.domain_id()))
+            .map(|domain| domain.domain_name().to_string());
+        let Some(domain_name) = domain_name else {
+            return;
+        };
+        let command = config::configuration()
+            .ssh_domains()
+            .iter()
+            .find(|d| d.name == domain_name)
+            .map(|d| d.sftp_command.trim().to_string())
+            .unwrap_or_default();
+        if command.is_empty() {
+            wezterm_toast_notification::persistent_toast_notification(
+                "SFTP",
+                &format!(
+                    "连接「{domain_name}」未配置 SFTP 命令：请在配置界面的 SSH 连接中填写（例如拉起 WinSCP 的命令行）"
+                ),
+            );
+            return;
+        }
+        log::info!("launch sftp tool for `{domain_name}`: {command}");
+        crate::spawn::shell_execute_command_line(&command);
     }
 
     fn get_splits(&mut self) -> Vec<PositionedSplit> {

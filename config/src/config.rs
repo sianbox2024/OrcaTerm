@@ -1021,7 +1021,7 @@ impl Config {
     }
 
     /// orca-term: 「右键智能复制/粘贴」mouse_bindings 块的唯一事实源。
-    /// 默认配置文件生成（DEFAULT_ORCA_CONFIG_LUA）与配置界面伪设置项
+    /// 默认配置文件生成（%SMART_RIGHT_CLICK% 占位符）与配置界面伪设置项
     /// 发射（config-ui-core）都引用它，避免两处文案漂移。
     pub const SMART_RIGHT_CLICK_LUA: &'static str = "\
 config.mouse_bindings = {
@@ -1041,9 +1041,43 @@ config.mouse_bindings = {
 }
 ";
 
+    /// orca-term: format-tab-title「标签页按颜色区分」彩色回调的唯一事实源。
+    /// 首启默认配置文件生成（%FORMAT_TAB_TITLE% 占位符）与配置界面发射
+    /// （config-ui-core ssh::emit_format_tab_title(true)）共用，避免两处漂移。
+    /// 该功能默认开：非激活 tab 按 tab_id 从 ANSI 亮色六色循环取底色，
+    /// 激活 tab 保持原样式；空标题兜底防止 tab 只剩关闭按钮。
+    pub const FORMAT_TAB_TITLE_COLORED_LUA: &'static str = "\
+wezterm.on('format-tab-title', function(tab, tabs, panes, config, hover, tab_max_width)
+  local title = tab.tab_title
+  if #title == 0 then
+    title = tab.active_pane.title
+  end
+  local pane = tab.active_pane
+  if pane and pane.is_elevated then
+    title = '(管理员)' .. title
+  end
+  if #title == 0 then
+    title = '终端'
+  end
+  -- orca:tab-colors
+  if not tab.is_active then
+    local hues = {'Red', 'Lime', 'Yellow', 'Blue', 'Fuchsia', 'Aqua'}
+    local bg = hues[(tab.tab_id % #hues) + 1]
+    return {
+      { Background = { AnsiColor = bg } },
+      { Foreground = { AnsiColor = 'Black' } },
+      { Text = ' ' .. title .. ' ' },
+    }
+  end
+  return {
+    { Text = title },
+  }
+end)
+";
+
     /// 首次启动的默认 orca-config.lua（便携包开箱即用）。
-    /// %SMART_RIGHT_CLICK% 占位符在生成时替换为 SMART_RIGHT_CLICK_LUA，
-    /// 见 default_orca_config_lua。
+    /// %SMART_RIGHT_CLICK% / %FORMAT_TAB_TITLE% 占位符在生成时替换为
+    /// 对应的 Lua 块，见 default_orca_config_lua。
     pub const DEFAULT_ORCA_CONFIG_LUA: &'static str = "\
 -- OrcaTerm 便携配置（程序首次启动时自动生成；删除本文件并重启会重新生成；
 -- 可手动编辑，也可由配置界面保存，支持热重载）
@@ -1071,12 +1105,17 @@ config.launch_menu = {
   { label = '新管理员PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }, elevate = true },
 }
 
+-- 标签页按颜色区分（默认开；非激活 tab 彩色，激活 tab 保持原样式）
+%FORMAT_TAB_TITLE%
+
 return config
 ";
 
-    /// 组装首次启动默认配置文件内容：替换智能复制/粘贴块占位符。
+    /// 组装首次启动默认配置文件内容：替换各 Lua 块占位符。
     pub fn default_orca_config_lua() -> String {
-        Self::DEFAULT_ORCA_CONFIG_LUA.replace("%SMART_RIGHT_CLICK%", Self::SMART_RIGHT_CLICK_LUA)
+        Self::DEFAULT_ORCA_CONFIG_LUA
+            .replace("%SMART_RIGHT_CLICK%", Self::SMART_RIGHT_CLICK_LUA)
+            .replace("%FORMAT_TAB_TITLE%", Self::FORMAT_TAB_TITLE_COLORED_LUA)
     }
 
     pub fn load_with_overrides(overrides: &wezterm_dynamic::Value) -> LoadedConfig {

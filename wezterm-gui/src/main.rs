@@ -45,9 +45,6 @@ mod overlay;
 mod quad;
 mod renderstate;
 mod resize_increment_calculator;
-#[cfg(windows)]
-mod sftp_dragout;
-mod sftp_window;
 mod scripting;
 mod scrollbar;
 mod selection;
@@ -1225,11 +1222,6 @@ fn run() -> anyhow::Result<()> {
                 ::windows::core::PCWSTR(wide_string("io.orcaterm.gui").as_ptr()),
             )
             .unwrap();
-        }
-        // SFTP 侧栏拖出(OLE DoDragDrop)需要 STA OLE。
-        // 失败可容忍:拖出功能届时不可用,其余功能不受影响。
-        unsafe {
-            winapi::um::ole2::OleInitialize(std::ptr::null_mut());
         }
     }
 
