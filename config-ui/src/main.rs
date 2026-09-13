@@ -999,50 +999,6 @@ impl ConfigUi {
         }
     }
 
-    fn render_preview(&self) -> impl IntoElement {
-        div()
-            .w(px(420.))
-            .flex_shrink_0()
-            .h_full()
-            .flex()
-            .flex_col()
-            .bg(theme::bg_elevated())
-            .border_l_1()
-            .border_color(theme::border())
-            .child(
-                div()
-                    .h(px(40.))
-                    .flex()
-                    .items_center()
-                    .px_3()
-                    .bg(theme::bg_panel())
-                    .border_b_1()
-                    .border_color(theme::border())
-                    .text_size(px(13.))
-                    .text_color(theme::fg_main())
-                    .child("配置文件预览 (JSON)"),
-            )
-            .when(self.dirty > 0, |d| {
-                d.child(
-                    div()
-                        .px_3()
-                        .py_1()
-                        .text_size(px(11.))
-                        .text_color(theme::accent())
-                        .child("未保存更改以表单为准"),
-                )
-            })
-            .child(
-                div()
-                    .flex_1()
-                    .p_3()
-                    .text_size(px(11.))
-                    .text_color(theme::fg_main())
-                    .font_family("JetBrains Mono")
-                    .child(pretty_json(&self.snapshot)),
-            )
-    }
-
     /// 渲染 TextInput 视图实体本身（含 track_focus/on_mouse_down/key_context 的交互 div）。
     /// 不能只渲染 TextElement——那只是纯绘制元素，交互层不进元素树会导致焦点永远无法建立。
     fn input(&self, entity: &Option<Entity<TextInput>>) -> impl IntoElement {
@@ -2065,13 +2021,8 @@ impl Render for ConfigUi {
                 div().flex_1().min_h_0().flex()
                     .child(self.render_sidebar(cx))
                     .child(self.render_content(cx))
-                    .child(self.render_preview()),
             )
     }
-}
-
-fn pretty_json(v: &serde_json::Value) -> String {
-    serde_json::to_string_pretty(v).unwrap_or_else(|_| "(无法序列化)".into())
 }
 
 /// TextInput 内容变化 → 表单 的单向观察者。apply 内部只在值真正变化时写 form/dirty，

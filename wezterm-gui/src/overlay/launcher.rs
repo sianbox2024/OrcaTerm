@@ -19,6 +19,7 @@ use mux::window::WindowId;
 use mux::Mux;
 use rayon::prelude::*;
 use std::collections::BTreeMap;
+use std::time::Duration;
 use termwiz::cell::{AttributeChange, CellAttributes};
 use termwiz::color::ColorAttribute;
 use termwiz::input::{InputEvent, KeyCode, KeyEvent, Modifiers, MouseButtons, MouseEvent};
@@ -35,13 +36,14 @@ pub struct Entry {
     pub action: KeyAssignment,
 }
 
+#[derive(Clone)]
 pub struct LauncherTabEntry {
     pub title: String,
     pub tab_idx: usize,
     pub pane_count: Option<usize>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct LauncherDomainEntry {
     pub domain_id: DomainId,
     pub name: String,
@@ -49,6 +51,7 @@ pub struct LauncherDomainEntry {
     pub label: String,
 }
 
+#[derive(Clone)]
 pub struct LauncherArgs {
     flags: LauncherFlags,
     domains: Vec<LauncherDomainEntry>,
@@ -190,6 +193,10 @@ struct LauncherState {
     /// 选中条目派发后的一次性回调（启动菜单场景用于
     /// 在新 tab 就绪后关闭初始 shell 标签；普通菜单传 None）
     on_launch: Option<Box<dyn FnOnce(&Entry) + Send>>,
+    /// 菜单条目来源参数快照（配置重载后重建条目用）
+    args: LauncherArgs,
+    /// 构建 entries 时的配置代次；变化即在 run_loop 中重建条目
+    config_generation: usize,
 }
 
 impl LauncherState {
@@ -508,8 +515,41 @@ impl LauncherState {
         }
     }
 
+    /// 配置重载后重建菜单条目（如启动菜单挂着时在配置界面新增 SSH 连接
+    /// 并保存 → 热重载代次变化 → 新条目即时出现在菜单里）。
+    /// 返回是否发生了重建，调用方据此决定是否重绘。
+    fn reload_entries_if_config_changed(&mut self) -> bool {
+        let generation = configuration().generation();
+        if generation == self.config_generation {
+            return false;
+        }
+        self.config_generation = generation;
+        self.entries.clear();
+        self.build_entries(self.args.clone());
+        self.update_filter();
+        // 光标位置尽量保留，clamp 到新列表范围内
+        self.active_idx = self
+            .active_idx
+            .min(self.filtered_entries.len().saturating_sub(1));
+        self.top_row = self
+            .top_row
+            .min(self.filtered_entries.len().saturating_sub(1));
+        true
+    }
+
     fn run_loop(&mut self, term: &mut TermWizTerminal) -> anyhow::Result<()> {
-        while let Ok(Some(event)) = term.poll_input(None) {
+        // 带超时轮询输入：空闲时醒来检测配置重载（generation 变化即重建条目），
+        // 否则挂着菜单期间保存配置永远看不到新条目（entries 是弹出时的快照）
+        while let Ok(event) = term.poll_input(Some(Duration::from_millis(250))) {
+            let event = match event {
+                Some(event) => event,
+                None => {
+                    if self.reload_entries_if_config_changed() {
+                        self.render(term)?;
+                    }
+                    continue;
+                }
+            };
             match event {
                 InputEvent::Key(KeyEvent {
                     key: KeyCode::Char(c),
@@ -658,6 +698,7 @@ pub fn launcher(
     on_launch: Option<Box<dyn FnOnce(&Entry) + Send>>,
 ) -> anyhow::Result<()> {
     let filtering = args.flags.contains(LauncherFlags::FUZZY);
+    let config_generation = configuration().generation();
     let mut state = LauncherState {
         active_idx: initial_choice_idx,
         max_items: 0,
@@ -675,6 +716,8 @@ pub fn launcher(
         alphabet: args.alphabet.clone(),
         always_fuzzy: filtering,
         on_launch,
+        args: args.clone(),
+        config_generation,
     };
 
     term.set_raw_mode()?;
