@@ -768,13 +768,25 @@ mod tests {
             crate::load::load_from_source(&src, std::path::Path::new("orca-config.lua")).unwrap();
         let cfg = &loaded.config;
         assert_eq!(cfg.color_scheme.as_deref(), Some("Aardvark Blue"));
-        let expected_prog: &[String] =
-            &[r"D:\Tools\PowerShell\7\pwsh.exe".into(), "-NoLogo".into()];
-        assert_eq!(
-            cfg.default_prog.as_deref(),
-            Some(expected_prog),
-            "default_prog 应为 pwsh 绝对路径 + -NoLogo"
-        );
+        // default_prog 由首启模板在生成时运行时探测（%PWSH_ARGS%），**不能断言
+        // 某个具体安装路径**——换机器/换安装方式必然失效。改为断言与探测结果
+        // 一致：探测到 pwsh 7 → 绝对路径 + -NoLogo；否则 → powershell.exe。
+        let prog = cfg
+            .default_prog
+            .as_deref()
+            .expect("模板应写明 default_prog");
+        match config::windows_pwsh_path() {
+            Some(pwsh) => assert_eq!(
+                prog,
+                &[pwsh, "-NoLogo".to_string()],
+                "default_prog 应为探测到的 pwsh 绝对路径 + -NoLogo"
+            ),
+            None => assert_eq!(
+                prog,
+                &["powershell.exe".to_string()],
+                "未探测到 pwsh 时 default_prog 应回退 powershell.exe"
+            ),
+        }
         assert_eq!(cfg.mouse_bindings.len(), 1, "右键智能复制/粘贴应默认开启");
         assert_eq!(cfg.launch_menu.len(), 4);
         let labels: Vec<&str> = cfg
@@ -798,6 +810,32 @@ mod tests {
         assert!(
             cfg.launch_menu[2].elevate && cfg.launch_menu[3].elevate,
             "管理员项应提权"
+        );
+        // 域钉死回归：未提权两项必须 DefaultDomain（本机域）。缺省取
+        // CurrentPaneDomain 时，在 SSH 标签里选菜单项会把 Windows 可执行文件路径
+        // 发到远端 request_pty 执行 → 远端无此程序 → spawn 失败且只写日志，
+        // 表现为「点了没反应、退回原 SSH 标签」。
+        // 提权两项必须保持 CurrentPaneDomain：spawn_command_internal 强制要求
+        // elevate 配 CurrentPaneDomain，否则直接 bail。
+        assert_eq!(
+            cfg.launch_menu[0].domain,
+            config::keyassignment::SpawnTabDomain::DefaultDomain,
+            "CMD 项应钉死本机域"
+        );
+        assert_eq!(
+            cfg.launch_menu[1].domain,
+            config::keyassignment::SpawnTabDomain::DefaultDomain,
+            "PowerShell 项应钉死本机域"
+        );
+        assert_eq!(
+            cfg.launch_menu[2].domain,
+            config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
+            "提权项必须保持 CurrentPaneDomain"
+        );
+        assert_eq!(
+            cfg.launch_menu[3].domain,
+            config::keyassignment::SpawnTabDomain::CurrentPaneDomain,
+            "提权项必须保持 CurrentPaneDomain"
         );
         // 「标签页按颜色区分」默认开:首启模板必须带彩色 format-tab-title
         // (含探测标记,配置界面靠它回显开关状态)

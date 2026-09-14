@@ -2,6 +2,7 @@
 /Issue/
 /.tag
 .zcode/
+.workbuddy-ai/ 
 .DS_Store
 dhat-heap.json
 /docs/

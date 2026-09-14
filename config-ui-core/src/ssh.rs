@@ -17,35 +17,12 @@ use serde_json::Value;
 fn resolve_pwsh(default_prog: Option<&[String]>) -> Option<String> {
     #[cfg(windows)]
     {
-        let from_path = std::env::var_os("PATH").and_then(|paths| {
-            std::env::split_paths(&paths)
-                .find(|dir| dir.join("pwsh.exe").is_file())
-                .map(|dir| dir.join("pwsh.exe"))
-        });
-        let candidates = [
-            from_path,
-            std::env::var_os("ProgramFiles").map(|pf| {
-                std::path::PathBuf::from(pf)
-                    .join("PowerShell")
-                    .join("7")
-                    .join("pwsh.exe")
-            }),
-            std::env::var_os("LocalAppData").map(|la| {
-                std::path::PathBuf::from(la)
-                    .join("Microsoft")
-                    .join("PowerShell")
-                    .join("pwsh.exe")
-            }),
-            Some(std::path::PathBuf::from(r"D:\Tools\PowerShell\7\pwsh.exe")),
-        ];
-        for c in candidates.into_iter().flatten() {
-            if c.is_file() {
-                return Some(c.to_string_lossy().into_owned());
-            }
-        }
-        // 配置快照的 default_prog 兜底:首启模板/用户配置写明 pwsh 完整路径
-        // (无论装在哪个盘)就是最直接的证据,路径本身即安装位。
-        default_prog.and_then(|prog| pwsh_path_from_prog(prog))
+        // 候选位扫描统一走 config::windows_pwsh_path（首启模板用同一函数，
+        // 避免两处候选位漂移）。
+        config::windows_pwsh_path()
+            // 配置快照的 default_prog 兜底:首启模板/用户配置写明 pwsh 完整路径
+            // (无论装在哪个盘)就是最直接的证据,路径本身即安装位。
+            .or_else(|| default_prog.and_then(pwsh_path_from_prog))
     }
     #[cfg(not(windows))]
     {
@@ -230,6 +207,8 @@ pub fn emit_ssh_domains(conns: &[SshConnection]) -> String {
 /// 发射 `config.launch_menu`：四项本地 shell（CMD / PowerShell / 管理员CMD / 管理员PowerShell，
 /// 后两项用 elevate=true 由提权的新 GUI 实例运行，UAC 授权后生效），再为每个 SSH 连接
 /// 生成对应条目。保存时无条件重写，保证菜单与连接列表同步。
+/// 前两项钉死 domain='DefaultDomain'（本地域），避免在 SSH 标签里误把 Windows
+/// 可执行文件路径发到远端执行；提权两项保持不设 domain，见下方注释。
 /// `default_prog` 为当前配置快照的默认程序（探测 pwsh 的最终证据，见 resolve_pwsh）。
 pub fn emit_launch_menu(conns: &[SshConnection], default_prog: Option<&[String]>) -> String {
     // PowerShell 菜单项与默认 shell 保持一致：探测到 pwsh 7 时用其绝对路径
@@ -248,11 +227,21 @@ pub fn emit_launch_menu(conns: &[SshConnection], default_prog: Option<&[String]>
         ),
     };
     let mut out = String::from("config.launch_menu = {\n");
-    out.push_str("  { label='新CMD窗口', args={'cmd.exe'} },\n");
+    // 前两项显式钉死 domain='DefaultDomain'（= mux 的默认域，GUI 启动时恒为
+    // 本地域，见 wezterm-gui/src/main.rs 的 Mux::new(Some(local_domain))）。
+    // 不写 domain 时它取 SpawnTabDomain 的 Default，即 CurrentPaneDomain——
+    // 在 SSH/WSL 标签里选菜单项会把 cmd.exe、pwsh.exe 整条命令行打包成
+    // request_pty 发到远端执行，远端没有这些 Windows 可执行文件，spawn 失败
+    // 且错误只进日志，表现为「点了没反应、退回原来的 SSH 标签」。
+    out.push_str("  { label='新CMD窗口', args={'cmd.exe'}, domain='DefaultDomain' },\n");
     out.push_str(&format!(
-        "  {{ label='{}', args={} }},\n",
+        "  {{ label='{}', args={}, domain='DefaultDomain' }},\n",
         ps_label, ps_args
     ));
+    // 提权两项**不能**设 domain：spawn_command_internal 要求 elevate 与
+    // CurrentPaneDomain 组合（否则 bail "elevate 不支持与非本机域组合使用"）。
+    // 它们本来就在本机生效——走 ShellExecute runas 拉起一个提权的本地 GUI
+    // 实例，与当前标签所属域无关。
     out.push_str("  { label='新管理员CMD窗口', args={'cmd.exe'}, elevate=true },\n");
     out.push_str(&format!(
         "  {{ label='{}', args={}, elevate=true }},\n",
@@ -529,11 +518,17 @@ mod tests {
         assert!(lua.contains("label='新CMD窗口'"), "{lua}");
         // PowerShell 项跟随本机探测（pwsh 7 绝对路径 / PS 5.1），但普通项与管理员
         // 项必须同源：提取普通项的 args 断言管理员项一致，防止两臂漂移。
-        let normal = lua.find("label='新PowerShell").expect("存在 PowerShell 菜单项");
-        let args_start = normal + lua[normal..].find("args={").expect("args 存在");
-        // 普通项行尾恒为 "args=... } },"——"} }," 的起点即 args 值自身的收尾 }
-        let args_end = args_start + lua[args_start..].find("} },").expect("args 收尾");
-        let ps_args = &lua[args_start..=args_end];
+        // 按行定位而非全文搜索 "} },"——普通项尾部现在是 "}, domain='DefaultDomain' },"。
+        let ps_line = lua
+            .lines()
+            .find(|l| l.contains("label='新PowerShell") && !l.contains("elevate"))
+            .expect("存在非管理员 PowerShell 菜单项");
+        let args_start = ps_line.find("args={").expect("args 存在") + "args=".len();
+        let args_end = args_start
+            + ps_line[args_start..]
+                .find("}, domain=")
+                .expect("普通 PowerShell 项应钉死 domain");
+        let ps_args = &ps_line[args_start..=args_end];
         assert!(
             lua.contains(&format!("{ps_args}, elevate=true")),
             "管理员 PowerShell 项应与普通项使用同一 shell：ps_args={ps_args:?} lua={lua}"
@@ -558,6 +553,43 @@ mod tests {
             empty.contains("新CMD窗口") && empty.contains("新管理员PowerShell") && !empty.contains("DomainName"),
             "{empty}"
         );
+    }
+
+    #[test]
+    fn launch_menu_pins_local_shells_to_default_domain() {
+        // 回归：四项本地 shell 中未提权的两项必须显式钉死 domain='DefaultDomain'。
+        // 缺省 domain 取 SpawnTabDomain::Default == CurrentPaneDomain，在 SSH 标签
+        // 里选菜单项会把 cmd.exe / pwsh.exe 整条命令行打包成 request_pty 发到远端
+        // 执行；远端没有这些 Windows 可执行文件 → spawn 失败且错误只进日志 →
+        // 表现为「点了没反应、退回原来的 SSH 标签」。
+        // 提权两项必须**不**带 domain：spawn_command_internal 要求 elevate 与
+        // CurrentPaneDomain 组合，否则直接 bail。
+        let lua = emit_launch_menu(&[], None);
+        assert!(
+            lua.contains("label='新CMD窗口', args={'cmd.exe'}, domain='DefaultDomain'"),
+            "CMD 项应钉死本地域：{lua}"
+        );
+        let ps_line = lua
+            .lines()
+            .find(|l| l.contains("label='新PowerShell") && !l.contains("elevate"))
+            .expect("存在非管理员 PowerShell 菜单项");
+        assert!(
+            ps_line.contains("domain='DefaultDomain'"),
+            "PowerShell 项应钉死本地域：{ps_line}"
+        );
+        // 按「新管理员」前缀匹配：管理员项的标签随 pwsh 探测结果漂移
+        // （'新管理员PowerShell窗口' / '新管理员PowerShell 7窗口'），不能写死。
+        let admin_lines: Vec<&str> = lua
+            .lines()
+            .filter(|l| l.contains("label='新管理员"))
+            .collect();
+        assert_eq!(admin_lines.len(), 2, "应有两项提权菜单：{lua}");
+        for line in admin_lines {
+            assert!(
+                !line.contains("domain="),
+                "提权项不能设 domain（spawn 层要求 elevate 配 CurrentPaneDomain）：{line}"
+            );
+        }
     }
 
     #[test]

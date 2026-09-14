@@ -31,6 +31,13 @@ pub fn spawn_command_impl(
             spawn_command_internal(spawn, spawn_where, size, src_window_id, term_config).await
         {
             log::error!("Failed to spawn: {:#}", err);
+            // 失败必须可见：此前只写日志，UI 上表现为「点了没反应、退回原来的标签」，
+            // 用户无法区分是程序没启动还是界面卡住。错误链已含域名/命令/cwd
+            // （见 mux::Mux::spawn_tab_or_window 的 with_context）。
+            wezterm_toast_notification::persistent_toast_notification(
+                "启动失败",
+                &format!("{err:#}"),
+            );
         }
     })
     .detach();

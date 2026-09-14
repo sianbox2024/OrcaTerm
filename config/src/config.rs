@@ -1088,8 +1088,8 @@ if wezterm.config_builder then
   config = wezterm.config_builder()
 end
 
--- 默认程序
-config.default_prog = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }
+-- 默认程序（pwsh 7 绝对路径在生成时探测，不硬编码某台机器的安装位）
+config.default_prog = { %PWSH_ARGS% }
 
 -- 配色方案
 config.color_scheme = 'Aardvark Blue'
@@ -1099,10 +1099,14 @@ config.color_scheme = 'Aardvark Blue'
 
 -- 右键点击标签栏加号的启动菜单（elevate 项经 UAC 提权，另开独立窗口）
 config.launch_menu = {
-  { label = '新CMD窗口', args = { 'cmd.exe' } },
-  { label = '新PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' } },
+  -- 未提权的两项钉死 domain='DefaultDomain'（本机域）：不写 domain 时取
+  -- CurrentPaneDomain，在 SSH 标签里选菜单项会把 Windows 可执行文件路径
+  -- 发到远端执行而静默失败。提权两项不可设 domain（spawn 层要求 elevate
+  -- 必须配 CurrentPaneDomain）。
+  { label = '新CMD窗口', args = { 'cmd.exe' }, domain = 'DefaultDomain' },
+  { label = '新PowerShell窗口', args = { %PWSH_ARGS% }, domain = 'DefaultDomain' },
   { label = '新管理员CMD窗口', args = { 'cmd.exe' }, elevate = true },
-  { label = '新管理员PowerShell窗口', args = { 'D:\\\\Tools\\\\PowerShell\\\\7\\\\pwsh.exe', '-NoLogo' }, elevate = true },
+  { label = '新管理员PowerShell窗口', args = { %PWSH_ARGS% }, elevate = true },
 }
 
 -- 标签页按颜色区分（默认开；激活 tab 彩色高亮，非激活 tab 保持原样式）
@@ -1116,6 +1120,22 @@ return config
         Self::DEFAULT_ORCA_CONFIG_LUA
             .replace("%SMART_RIGHT_CLICK%", Self::SMART_RIGHT_CLICK_LUA)
             .replace("%FORMAT_TAB_TITLE%", Self::FORMAT_TAB_TITLE_COLORED_LUA)
+            .replace("%PWSH_ARGS%", &Self::default_pwsh_args_lua())
+    }
+
+    /// 默认 shell 的 Lua 参数列表内容（default_prog 与 launch_menu 共用）：
+    /// 探测到 pwsh 7 用其绝对路径 + -NoLogo，否则回退系统自带的 powershell.exe
+    /// （PS 5.1，裸名安全）。运行时解析而非把安装位硬编码进模板。
+    fn default_pwsh_args_lua() -> String {
+        match windows_pwsh_path() {
+            Some(pwsh) => format!("'{}', '-NoLogo'", Self::lua_quote(&pwsh)),
+            None => "'powershell.exe'".to_string(),
+        }
+    }
+
+    /// Lua 单引号字符串字面量转义：反斜杠与单引号各需转义。
+    fn lua_quote(v: &str) -> String {
+        v.replace('\\', "\\\\").replace('\'', "\\'")
     }
 
     pub fn load_with_overrides(overrides: &wezterm_dynamic::Value) -> LoadedConfig {
@@ -1924,36 +1944,74 @@ fn default_gui_startup_args() -> Vec<String> {
 // 或配置未写 default_prog（如 config-ui 生成的空模板）时生效。
 fn default_default_prog() -> Option<Vec<String>> {
     if cfg!(windows) {
-        if windows_has_pwsh() {
-            Some(vec!["pwsh.exe".to_string(), "-NoLogo".to_string()])
-        } else {
-            Some(vec!["powershell.exe".to_string()])
+        match windows_pwsh_path() {
+            // 用绝对路径而非裸名：绿色版 pwsh 不在 PATH，裸名启动即失败。
+            Some(pwsh) => Some(vec![pwsh, "-NoLogo".to_string()]),
+            None => Some(vec!["powershell.exe".to_string()]),
         }
     } else {
         None
     }
 }
 
-// 探测 pwsh.exe：先扫 PATH，再查标准安装位 %ProgramFiles%\PowerShell\7。
-fn windows_has_pwsh() -> bool {
-    if let Some(paths) = std::env::var_os("PATH") {
-        for dir in std::env::split_paths(&paths) {
-            if dir.join("pwsh.exe").is_file() {
-                return true;
-            }
-        }
+/// 解析 pwsh 7 的安装位，返回**绝对路径**；找不到返回 None。
+/// 探测顺序：`ORCATERM_PWSH` 环境变量 → PATH → `%ProgramFiles%\PowerShell\7`
+/// （MSI/Store 标准位）→ `%LocalAppData%\Microsoft\PowerShell`（用户级安装）
+/// → `D:\Tools\PowerShell\7`（绿色版启发式，见下）。
+/// 返回绝对路径而非裸名：裸名依赖 PATH，而解析结果会被写进配置、在
+/// PATH 不同的上下文（提权/最小环境）里执行，绿色版下裸名直接启动失败。
+/// 首启模板与配置界面的 launch_menu 共用本函数，避免两处候选位漂移。
+///
+/// 关于最后的绿色版候选：便携版安装无任何注册痕迹，穷举式探测在原理上不可能
+/// 覆盖，因此保留该启发式候选作为兜底。**它只是候选之一，不是硬依赖**——
+/// 换机器/挪位置时若该路径不存在，会自动落到 powershell.exe（PS 5.1）；
+/// 需要精确指路时设 `ORCATERM_PWSH` 环境变量即可跳过全部启发式。
+pub fn windows_pwsh_path() -> Option<String> {
+    if !cfg!(windows) {
+        return None;
     }
-    if let Some(pf) = std::env::var_os("ProgramFiles") {
-        if std::path::PathBuf::from(pf)
-            .join("PowerShell")
-            .join("7")
-            .join("pwsh.exe")
-            .is_file()
-        {
-            return true;
+    // 显式指定优先：给「路径写死」留一个无需改代码的逃生口。
+    // 设了但文件不存在时不静默忽略到底——继续走下面的启发式，避免配错环境变量
+    // 反而比不配更糟。
+    if let Some(explicit) = std::env::var_os("ORCATERM_PWSH") {
+        let candidate = std::path::PathBuf::from(explicit);
+        if candidate.is_file() {
+            return Some(candidate.to_string_lossy().into_owned());
         }
+        log::warn!(
+            "ORCATERM_PWSH 指向的文件不存在，回退到自动探测：{}",
+            candidate.display()
+        );
     }
-    false
+    let from_path = std::env::var_os("PATH").and_then(|paths| {
+        std::env::split_paths(&paths)
+            .find(|dir| dir.join("pwsh.exe").is_file())
+            .map(|dir| dir.join("pwsh.exe"))
+    });
+    let candidates = [
+        from_path,
+        std::env::var_os("ProgramFiles").map(|pf| {
+            std::path::PathBuf::from(pf)
+                .join("PowerShell")
+                .join("7")
+                .join("pwsh.exe")
+        }),
+        std::env::var_os("LocalAppData").map(|la| {
+            std::path::PathBuf::from(la)
+                .join("Microsoft")
+                .join("PowerShell")
+                .join("pwsh.exe")
+        }),
+        Some(std::path::PathBuf::from(
+            r"D:\Tools\PowerShell\7\pwsh.exe",
+        )),
+    ];
+    // 显式 IntoIterator::into_iter：本 crate 是 2018 edition，数组的
+    // `.into_iter()` 语义歧义（会告警且 2021 起变按值迭代）。
+    IntoIterator::into_iter(candidates)
+        .flatten()
+        .find(|c| c.is_file())
+        .map(|c| c.to_string_lossy().into_owned())
 }
 
 // Coupled with term/src/config.rs:TerminalConfiguration::unicode_version
