@@ -61,6 +61,8 @@ pub struct TextInput {
     /// 显示文本→content 的字节映射；None 表示显示文本与 content 逐字节相同（无控制字符）。
     display_map: Option<Rc<[usize]>>,
     is_selecting: bool,
+    /// 禁用态：true 时不挂焦点/鼠标/键盘监听，纯展示不可交互。
+    disabled: bool,
 }
 
 impl TextInput {
@@ -76,7 +78,27 @@ impl TextInput {
             last_bounds: None,
             display_map: None,
             is_selecting: false,
+            disabled: false,
         }
+    }
+
+    pub fn set_disabled(&mut self, disabled: bool) {
+        self.disabled = disabled;
+    }
+
+    /// 程序化整体替换文本（加载/切换记录回填用）：与用户键入走同一条失效路径——
+    /// 必须 cx.notify()，否则实体不标脏，gpui 可能继续绘制旧的 shaped 文本
+    ///（切换 SSH 连接时私钥路径偶发显示成上一条连接的值即此坑）。
+    /// 选区/输入法组合态一并归零，避免旧选区偏移落到新文本上。
+    pub fn set_content(&mut self, text: &str, cx: &mut Context<Self>) {
+        if self.content.as_ref() == text {
+            return;
+        }
+        self.content = text.into();
+        self.selected_range = 0..0;
+        self.selection_reversed = false;
+        self.marked_range = None;
+        cx.notify();
     }
 
     fn left(&mut self, _: &Left, _: &mut Window, cx: &mut Context<Self>) {
@@ -601,12 +623,16 @@ impl gpui::Element for TextElement {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let focus_handle = self.input.read(cx).focus_handle.clone();
-        window.handle_input(
-            &focus_handle,
-            ElementInputHandler::new(bounds, self.input.clone()),
-            cx,
-        );
+        let input = self.input.read(cx);
+        let disabled = input.disabled;
+        let focus_handle = input.focus_handle.clone();
+        if !disabled {
+            window.handle_input(
+                &focus_handle,
+                ElementInputHandler::new(bounds, self.input.clone()),
+                cx,
+            );
+        }
         if let Some(selection) = prepaint.selection.take() {
             window.paint_quad(selection)
         }
@@ -621,7 +647,7 @@ impl gpui::Element for TextElement {
         )
         .unwrap();
 
-        if focus_handle.is_focused(window)
+        if !disabled && focus_handle.is_focused(window)
             && let Some(cursor) = prepaint.cursor.take()
         {
             window.paint_quad(cursor);
@@ -637,30 +663,34 @@ impl gpui::Element for TextElement {
 
 impl Render for TextInput {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        div()
-            .flex()
-            .w_full()
-            .key_context("TextInput")
-            .track_focus(&self.focus_handle(cx))
-            .cursor(CursorStyle::IBeam)
-            .on_action(cx.listener(Self::backspace))
-            .on_action(cx.listener(Self::delete))
-            .on_action(cx.listener(Self::left))
-            .on_action(cx.listener(Self::right))
-            .on_action(cx.listener(Self::select_left))
-            .on_action(cx.listener(Self::select_right))
-            .on_action(cx.listener(Self::select_all))
-            .on_action(cx.listener(Self::home))
-            .on_action(cx.listener(Self::end))
-            .on_action(cx.listener(Self::show_character_palette))
-            .on_action(cx.listener(Self::paste))
-            .on_action(cx.listener(Self::cut))
-            .on_action(cx.listener(Self::copy))
-            .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
-            .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
-            .on_mouse_move(cx.listener(Self::on_mouse_move))
-            .bg(theme::bg_elevated())
+        let mut d = div().flex().w_full();
+        if self.disabled {
+            // 禁用态：只保留外观，摘掉全部交互接线（焦点/鼠标/键位 action）。
+            d = d.cursor(CursorStyle::Arrow);
+        } else {
+            d = d
+                .key_context("TextInput")
+                .track_focus(&self.focus_handle(cx))
+                .cursor(CursorStyle::IBeam)
+                .on_action(cx.listener(Self::backspace))
+                .on_action(cx.listener(Self::delete))
+                .on_action(cx.listener(Self::left))
+                .on_action(cx.listener(Self::right))
+                .on_action(cx.listener(Self::select_left))
+                .on_action(cx.listener(Self::select_right))
+                .on_action(cx.listener(Self::select_all))
+                .on_action(cx.listener(Self::home))
+                .on_action(cx.listener(Self::end))
+                .on_action(cx.listener(Self::show_character_palette))
+                .on_action(cx.listener(Self::paste))
+                .on_action(cx.listener(Self::cut))
+                .on_action(cx.listener(Self::copy))
+                .on_mouse_down(MouseButton::Left, cx.listener(Self::on_mouse_down))
+                .on_mouse_up(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_up_out(MouseButton::Left, cx.listener(Self::on_mouse_up))
+                .on_mouse_move(cx.listener(Self::on_mouse_move));
+        }
+        d.bg(theme::bg_elevated())
             .border_1()
             .border_color(theme::border())
             .rounded_sm()

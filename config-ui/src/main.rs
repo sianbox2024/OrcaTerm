@@ -14,9 +14,9 @@ use config_ui_core::schemes::{SchemeInfo, builtin_schemes};
 use config_ui_core::settings::{self, Kind, SettingValue, SETTINGS};
 use config_ui_core::ssh::{self, SshConnection};
 use gpui::{
-    actions, div, prelude::*, px, rgb, size, App, Bounds, Context, Entity, Focusable, KeyBinding,
-    KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Pixels, Rgba,
-    Window, WindowBounds, WindowOptions,
+    actions, div, prelude::*, px, rgb, size, uniform_list, AnyElement, App, Bounds, Context, Entity,
+    Focusable, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    Pixels, Rgba, ScrollStrategy, UniformListScrollHandle, Window, WindowBounds, WindowOptions,
 };
 use notify::Watcher;
 use text_input::{TextInput, bind_input_keys};
@@ -198,12 +198,17 @@ struct ConfigUi {
     key_search: Option<Entity<TextInput>>,
     key_filter: String,
     selected_binding: Option<usize>,
+    /// 高亮选中的默认键位行（keybinds::DEFAULT_BINDINGS 下标），
+    /// 与 selected_binding 互斥
+    selected_default: Option<usize>,
+    /// 键位列表滚动句柄：选动作标签后自动滚到对应行
+    keys_list_scroll: UniformListScrollHandle,
     edit_mods_input: Option<Entity<TextInput>>,
     edit_key_input: Option<Entity<TextInput>>,
     /// 第一步选中的动作（EDITABLE_ACTIONS 下标）；None=未选
     edit_action: Option<usize>,
     /// 选中绑定的动作不在快捷清单时的暂存（动作名, 参数）——未点选任何
-    /// 清单动作前，「应用修改」原样保留它，避免静默改写动作
+    /// 清单动作前，「应用绑定」原样保留它，避免静默改写动作
     custom_action: Option<(String, String)>,
     capture_mode: bool,
     // 组7 SSH 连接
@@ -258,6 +263,8 @@ impl ConfigUi {
             key_search: None,
             key_filter: String::new(),
             selected_binding: None,
+            selected_default: None,
+            keys_list_scroll: UniformListScrollHandle::new(),
             edit_mods_input: None,
             edit_key_input: None,
             edit_action: None,
@@ -527,11 +534,29 @@ impl ConfigUi {
                 }
             }
         }
+        // 键绑定编辑录入框：禁用态跟随「是否已选动作」。首次创建时未选动作 →
+        // 禁用（流程起点是选动作标签）；外部重载后按当前选中状态复原——
+        // reload 不重置 edit_action/custom_action，此处取值与渲染层 no_action 一致。
+        let no_action = self.edit_action.is_none() && self.custom_action.is_none();
+        self.set_input_disabled(&self.edit_mods_input, no_action, cx);
+        self.set_input_disabled(&self.edit_key_input, no_action, cx);
     }
 
     fn set_input(&self, e: &Option<Entity<TextInput>>, val: &str, cx: &mut Context<Self>) {
         if let Some(e) = e {
-            e.update(cx, |i, _| i.content = val.into());
+            e.update(cx, |i, cx| i.set_content(val, cx));
+        }
+    }
+
+    /// 设置输入框禁用态（配合 TextInput::set_disabled）：禁用时不可聚焦/不可输入。
+    fn set_input_disabled(
+        &self,
+        e: &Option<Entity<TextInput>>,
+        disabled: bool,
+        cx: &mut Context<Self>,
+    ) {
+        if let Some(e) = e {
+            e.update(cx, |i, _| i.set_disabled(disabled));
         }
     }
 
@@ -561,6 +586,7 @@ impl ConfigUi {
         self.form = FormState::from_snapshot(&self.snapshot, &self.baseline);
         self.bindings = keybinds::parse_bindings(&self.snapshot);
         self.selected_binding = None;
+        self.selected_default = None;
         self.ssh_conns = ssh::parse_ssh_domains(&self.snapshot);
         self.baseline_ssh_conns = self.ssh_conns.clone();
         self.selected_ssh = None;
@@ -1277,6 +1303,9 @@ fn keystroke_to_wezterm(e: &KeyDownEvent) -> (String, String) {
 }
 
 fn action_display(b: &Binding) -> String {
+    if b.is_disable() {
+        return "禁用默认键位".to_string();
+    }
     match EDITABLE_ACTIONS
         .iter()
         .find(|(n, a, _)| *n == b.action_name && *a == b.action_arg)
@@ -1293,35 +1322,226 @@ fn action_display(b: &Binding) -> String {
     }
 }
 
+/// 键位列表行：自定义绑定 / 默认键位 / 分区标题 / 空列表提示。
+/// uniform_list 要求统一行高，标题与提示也作为普通行混入同一张表。
+#[derive(Clone, Copy)]
+enum KeyRowKind {
+    Custom(usize),
+    Default(usize),
+    Divider,
+    EmptyHint,
+}
+
+/// 「删除绑定」按钮的目标语义：
+/// - Custom(i)：删除用户自定义条目（禁用占位条目也走这里，删它=恢复默认）
+/// - DefaultDisable(j)：选中的默认键仍生效 → 写入禁用占位
+/// - DefaultRestore(j)：选中的默认键已被禁用 → 移除禁用占位
+#[derive(Clone, Copy)]
+enum DeleteTarget {
+    Custom(usize),
+    DefaultDisable(usize),
+    DefaultRestore(usize),
+}
+
+fn binding_row_matches(mods: &str, key: &str, act: &str, q: &str) -> bool {
+    q.is_empty()
+        || mods.to_lowercase().contains(q)
+        || key.to_lowercase().contains(q)
+        || act.to_lowercase().contains(q)
+}
+
+/// 按搜索词构建键位列表行序列：自定义绑定 → 分隔线 →（空提示）→ 默认键位。
+fn build_key_rows(bindings: &[Binding], q: &str) -> Vec<KeyRowKind> {
+    let mut rows = Vec::new();
+    for (i, b) in bindings.iter().enumerate() {
+        if binding_row_matches(&b.mods, &b.key, &action_display(b), q) {
+            rows.push(KeyRowKind::Custom(i));
+        }
+    }
+    rows.push(KeyRowKind::Divider);
+    if bindings.is_empty() {
+        rows.push(KeyRowKind::EmptyHint);
+    }
+    for (j, (dm, dk, dact)) in keybinds::DEFAULT_BINDINGS.iter().enumerate() {
+        if binding_row_matches(dm, dk, &default_binding_action_cn(dact), q) {
+            rows.push(KeyRowKind::Default(j));
+        }
+    }
+    rows
+}
+
 impl ConfigUi {
-    fn select_binding(&mut self, i: usize, cx: &mut Context<Self>) {
-        self.selected_binding = Some(i);
-        let b = self.bindings[i].clone();
-        self.set_input(&self.edit_mods_input, &b.mods, cx);
-        self.set_input(&self.edit_key_input, &b.key, cx);
-        // 动作匹配（名称+参数）:在清单里则高亮对应项;不在（旧配置遗留的
-        // 清单外动作）暂存原样,未点选清单动作前「应用修改」不会改写它
-        match EDITABLE_ACTIONS
+    /// 当前编辑器「目标动作」：优先取 custom_action（清单外的遗留动作），
+    /// 否则取 EDITABLE_ACTIONS 中被选中的下标；都没有返回 None。
+    fn action_for_editor(&self) -> Option<(String, String)> {
+        if let Some((n, a)) = self.custom_action.as_ref() {
+            return Some((n.clone(), a.clone()));
+        }
+        self.edit_action.map(|idx| {
+            let (n, a, _) = EDITABLE_ACTIONS[idx];
+            (n.to_string(), a.to_string())
+        })
+    }
+
+    /// 在 self.bindings 中找与给定动作 (name+arg) 匹配的那一行下标。
+    /// 「同动作」只看动作名+参数，按键组合不同不算——避免误覆盖兄弟绑定。
+    fn binding_index_for(&self, name: &str, arg: &str) -> Option<usize> {
+        self.bindings
             .iter()
-            .position(|(n, a, _)| *n == b.action_name && *a == b.action_arg)
-        {
+            .position(|b| b.action_name == name && b.action_arg == arg)
+    }
+
+    /// 默认表某行的组合键是否已被用户的禁用占位条目禁用。
+    fn combo_is_disabled(&self, mods: &str, key: &str) -> bool {
+        let target = (keybinds::norm_mods(mods), key.to_lowercase());
+        self.bindings
+            .iter()
+            .any(|b| b.is_disable() && b.combo() == target)
+    }
+
+    /// 按动作 (name,arg) 落定第一步选择：清单内→高亮标签；清单外→暂存原样。
+    fn set_action_target_from(&mut self, name: &str, arg: &str) {
+        match EDITABLE_ACTIONS.iter().position(|(n, a, _)| *n == name && *a == arg) {
             Some(idx) => {
                 self.edit_action = Some(idx);
                 self.custom_action = None;
             }
             None => {
                 self.edit_action = None;
-                self.custom_action = Some((b.action_name.clone(), b.action_arg.clone()));
+                self.custom_action = Some((name.to_string(), arg.to_string()));
             }
+        }
+    }
+
+    fn clear_edit_inputs(&mut self, cx: &mut Context<Self>) {
+        self.set_input(&self.edit_mods_input, "", cx);
+        self.set_input(&self.edit_key_input, "", cx);
+    }
+
+    /// 选中动作后的统一落点：自定义绑定优先高亮；否则查**仍生效**的默认键
+    /// → 高亮默认行并回填组合键；默认键已禁用或该动作无默认键 → 视为未绑定。
+    fn focus_action(&mut self, name: &str, arg: &str, cx: &mut Context<Self>) {
+        self.selected_binding = None;
+        self.selected_default = None;
+        match self.binding_index_for(name, arg) {
+            Some(i) => {
+                self.selected_binding = Some(i);
+                let b = self.bindings[i].clone();
+                self.set_input(&self.edit_mods_input, &b.mods, cx);
+                self.set_input(&self.edit_key_input, &b.key, cx);
+            }
+            None => match keybinds::default_binding_for_action(name, arg) {
+                Some((j, dm, dk)) if !self.combo_is_disabled(&dm, &dk) => {
+                    self.selected_default = Some(j);
+                    self.set_input(&self.edit_mods_input, &dm, cx);
+                    self.set_input(&self.edit_key_input, &dk, cx);
+                }
+                _ => self.clear_edit_inputs(cx),
+            },
+        }
+        self.set_input_disabled(&self.edit_mods_input, false, cx);
+        self.set_input_disabled(&self.edit_key_input, false, cx);
+        self.scroll_to_selection();
+        cx.notify();
+    }
+
+    /// 把当前高亮行滚进列表视口（已完全可见时不滚动）。
+    fn scroll_to_selection(&self) {
+        let rows = build_key_rows(&self.bindings, &self.key_filter);
+        let target = if let Some(i) = self.selected_binding {
+            rows.iter().position(|r| matches!(r, KeyRowKind::Custom(x) if *x == i))
+        } else {
+            self.selected_default
+                .and_then(|j| rows.iter().position(|r| matches!(r, KeyRowKind::Default(x) if *x == j)))
+        };
+        if let Some(pos) = target {
+            self.keys_list_scroll.scroll_to_item(pos, ScrollStrategy::Center);
+        }
+    }
+
+    /// 「删除绑定」按钮的当前目标；None 时按钮不渲染。
+    fn delete_target(&self) -> Option<DeleteTarget> {
+        if let Some(i) = self.selected_binding {
+            if i < self.bindings.len() {
+                let b = &self.bindings[i];
+                // 禁用占位条目不对应编辑器动作，选中它只为删除（=恢复默认）
+                if b.is_disable() {
+                    return Some(DeleteTarget::Custom(i));
+                }
+                if let Some((name, arg)) = self.action_for_editor() {
+                    if b.action_name == name && b.action_arg == arg {
+                        return Some(DeleteTarget::Custom(i));
+                    }
+                }
+            }
+        }
+        if let Some(j) = self.selected_default {
+            let (dm, dk, _) = keybinds::DEFAULT_BINDINGS[j];
+            return if self.combo_is_disabled(dm, dk) {
+                Some(DeleteTarget::DefaultRestore(j))
+            } else {
+                Some(DeleteTarget::DefaultDisable(j))
+            };
+        }
+        None
+    }
+
+    fn select_action_tag(&mut self, idx: usize, cx: &mut Context<Self>) {
+        self.edit_action = Some(idx);
+        self.custom_action = None;
+        let (name, arg) = {
+            let (n, a, _) = EDITABLE_ACTIONS[idx];
+            (n.to_string(), a.to_string())
+        };
+        self.focus_action(&name, &arg, cx);
+    }
+
+    fn select_binding(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i >= self.bindings.len() {
+            return;
+        }
+        self.selected_binding = Some(i);
+        self.selected_default = None;
+        let b = self.bindings[i].clone();
+        self.set_input(&self.edit_mods_input, &b.mods, cx);
+        self.set_input(&self.edit_key_input, &b.key, cx);
+        // 选中行同样落定了编辑目标动作 → 录入框解禁
+        self.set_input_disabled(&self.edit_mods_input, false, cx);
+        self.set_input_disabled(&self.edit_key_input, false, cx);
+        // 禁用占位条目不代表任何可编辑动作：保持当前动作选择不变，
+        // 选中它只为删除（恢复默认）。
+        if !b.is_disable() {
+            self.set_action_target_from(&b.action_name, &b.action_arg);
         }
         cx.notify();
     }
 
-    /// 从编辑器控件读取内容，写回选中绑定（apply=true）或追加为新绑定。
-    /// 流程固定为「选动作 → 录按键 → 添加/应用」；动作参数在清单里预绑定，
-    /// 无参数框。所有字段先规范化校验，失败在顶部错误横幅给出一句话原因——
-    /// 绝不静默无效。
-    fn commit_editor(&mut self, apply: bool, cx: &mut Context<Self>) {
+    /// 点选默认键位行：落定其动作（清单外的也支持）、回填组合键、解禁录入区。
+    /// 已禁用的行同样可点——那是「恢复默认」的入口。
+    fn select_default(&mut self, j: usize, cx: &mut Context<Self>) {
+        let Some((name, arg)) = keybinds::default_action_at(j) else {
+            return;
+        };
+        let (dm, dk) = {
+            let (dm, dk, _) = keybinds::DEFAULT_BINDINGS[j];
+            (dm.to_string(), dk.to_string())
+        };
+        self.selected_default = Some(j);
+        self.selected_binding = None;
+        self.set_input(&self.edit_mods_input, &dm, cx);
+        self.set_input(&self.edit_key_input, &dk, cx);
+        self.set_input_disabled(&self.edit_mods_input, false, cx);
+        self.set_input_disabled(&self.edit_key_input, false, cx);
+        self.set_action_target_from(&name, &arg);
+        cx.notify();
+    }
+
+    /// 「应用绑定」：按动作 (name+arg) upsert 用户自定义条目（有则覆盖、无则追加）。
+    /// 对带内置默认键的动作额外执行「覆盖」语义（用户选定：改绑即换键）：
+    /// · 录成别的组合键 → 自动给旧默认键补一条禁用占位；
+    /// · 录回默认组合键 → 移除该动作的自定义条目与禁用占位 = 恢复默认。
+    /// 所有字段先规范化校验，失败在顶部错误横幅给出一句话原因——绝不静默无效。
+    fn apply_binding(&mut self, cx: &mut Context<Self>) {
         let read = |e: &Option<Entity<TextInput>>| {
             e.as_ref().map(|e| e.read(cx).content.to_string()).unwrap_or_default()
         };
@@ -1347,31 +1567,91 @@ impl ConfigUi {
             Ok(k) => k,
             Err(msg) => return fail(self, msg, cx),
         };
-        let b = Binding { mods, key, action_name: name, action_arg: arg };
-        if apply {
-            if let Some(i) = self.selected_binding {
-                if i < self.bindings.len() {
-                    self.bindings[i] = b;
-                    self.dirty += 1;
-                }
+
+        if let Some((row, dm, dk)) = keybinds::default_binding_for_action(&name, &arg) {
+            let def_combo = (keybinds::norm_mods(&dm), dk.to_lowercase());
+            if (keybinds::norm_mods(&mods), key.to_lowercase()) == def_combo {
+                // 录回默认键：清掉该动作的自定义条目与默认键禁用占位 = 恢复出厂行为
+                self.bindings.retain(|b| {
+                    !(b.action_name == name && b.action_arg == arg)
+                        && !(b.is_disable() && b.combo() == def_combo)
+                });
+                self.selected_binding = None;
+                self.selected_default = Some(row);
+                self.dirty += 1;
+                self.error = None;
+                self.scroll_to_selection();
+                cx.notify();
+                return;
+            }
+            // 改绑成新组合键：upsert 动作条目；旧默认键仍生效才补禁用占位
+            self.upsert_binding(Binding { mods, key, action_name: name, action_arg: arg });
+            if !self.combo_is_disabled(&dm, &dk) {
+                self.bindings.push(Binding {
+                    mods: dm,
+                    key: dk,
+                    action_name: keybinds::DISABLE_DEFAULT_ASSIGNMENT.into(),
+                    action_arg: String::new(),
+                });
             }
         } else {
-            self.bindings.push(b);
-            self.selected_binding = Some(self.bindings.len() - 1);
-            self.dirty += 1;
+            // 无默认键的动作：纯 upsert
+            self.upsert_binding(Binding { mods, key, action_name: name, action_arg: arg });
         }
+        self.dirty += 1;
         self.error = None;
+        self.scroll_to_selection();
         cx.notify();
     }
 
-    fn delete_binding(&mut self, cx: &mut Context<Self>) {
-        if let Some(i) = self.selected_binding.take() {
-            if i < self.bindings.len() {
-                self.bindings.remove(i);
-                self.dirty += 1;
-                cx.notify();
+    /// 同动作 (name+arg) 条目覆盖或追加，并把选中态指向该行。
+    fn upsert_binding(&mut self, b: Binding) {
+        match self.binding_index_for(&b.action_name, &b.action_arg) {
+            Some(i) => {
+                self.bindings[i] = b;
+                self.selected_binding = Some(i);
+            }
+            None => {
+                self.bindings.push(b);
+                self.selected_binding = Some(self.bindings.len() - 1);
             }
         }
+        self.selected_default = None;
+    }
+
+    /// 「删除绑定 / 恢复默认」按钮入口，目标语义由 delete_target() 决定：
+    /// 删自定义条目后清空录入框但保留动作选择（可立刻录新键再应用）；
+    /// 禁用/恢复默认键后保持默认行选中，按钮文案随之切换，可反复反悔。
+    fn delete_binding(&mut self, cx: &mut Context<Self>) {
+        let Some(target) = self.delete_target() else {
+            return;
+        };
+        match target {
+            DeleteTarget::Custom(i) => {
+                self.bindings.remove(i);
+                self.selected_binding = None;
+                self.clear_edit_inputs(cx);
+            }
+            DeleteTarget::DefaultDisable(j) => {
+                let (dm, dk, _) = keybinds::DEFAULT_BINDINGS[j];
+                self.bindings.push(Binding {
+                    mods: dm.to_string(),
+                    key: dk.to_string(),
+                    action_name: keybinds::DISABLE_DEFAULT_ASSIGNMENT.into(),
+                    action_arg: String::new(),
+                });
+                // selected_default 保持 Some(j)：按钮随即变为「恢复默认」
+            }
+            DeleteTarget::DefaultRestore(j) => {
+                let (dm, dk, _) = keybinds::DEFAULT_BINDINGS[j];
+                let def_combo = (keybinds::norm_mods(dm), dk.to_lowercase());
+                self.bindings
+                    .retain(|b| !(b.is_disable() && b.combo() == def_combo));
+                // selected_default 保持 Some(j)：按钮变回「删除绑定」
+            }
+        }
+        self.dirty += 1;
+        cx.notify();
     }
 
     /// 从编辑器输入框收集一条连接草案：名称留空自动命名，端口解析失败回退 22。
@@ -1459,10 +1739,7 @@ impl ConfigUi {
     fn pick_private_key_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = pick_file_win32(window, "选择 SSH 私钥文件");
         if let (Some(path), Some(entity)) = (path, self.ssh_key_input.as_ref()) {
-            entity.update(cx, |input, cx| {
-                input.content = path.into();
-                cx.notify();
-            });
+            entity.update(cx, |input, cx| input.set_content(&path, cx));
         }
     }
 
@@ -1471,10 +1748,15 @@ impl ConfigUi {
     fn pick_default_prog_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let path = pick_file_win32(window, "选择默认启动程序");
         if let (Some(path), Some(entity)) = (path, self.default_prog_input.as_ref()) {
-            entity.update(cx, |input, cx| {
-                input.content = path.into();
-                cx.notify();
-            });
+            entity.update(cx, |input, cx| input.set_content(&path, cx));
+        }
+    }
+
+    /// 弹出系统文件选择框选 SFTP 工具程序（如 WinSCP.exe），结果写回输入框。
+    fn pick_sftp_program_file(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let path = pick_file_win32(window, "选择 SFTP 工具程序");
+        if let (Some(path), Some(entity)) = (path, self.ssh_sftp_input.as_ref()) {
+            entity.update(cx, |input, cx| input.set_content(&path, cx));
         }
     }
 
@@ -1597,8 +1879,11 @@ impl ConfigUi {
             )
             .child(
                 div().flex().items_center().gap_2()
-                    .child(lbl("SFTP 命令"))
-                    .child(self.input(&self.ssh_sftp_input)),
+                    .child(lbl("SFTP 程序路径"))
+                    .child(self.input(&self.ssh_sftp_input))
+                    .child(btn("浏览…", cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                        this.pick_sftp_program_file(window, cx)
+                    }))),
             )
             .child(
                 div().flex().gap_2()
@@ -1623,7 +1908,7 @@ impl ConfigUi {
             )
             .child(
                 div().text_size(px(11.)).text_color(theme::fg_dim())
-                    .child("SFTP 命令（可选）：点终端标签栏 SFTP 按钮时执行的外部工具命令，如 \"D:\\Program Files (x86)\\WinSCP\\WinSCP.exe\" \"会话名\" /newinstance；留空=按钮提示未配置。"),
+                    .child("SFTP 程序路径（可选）：点终端标签栏 SFTP 按钮时拉起的外部工具程序（如 WinSCP.exe），点「浏览…」选择。命令行、用户名、主机、密钥由本连接配置自动拼凑（密钥自动改用 .ppk 后缀）；留空=按钮提示未配置。"),
             );
 
         div().flex().flex_col().gap_3()
@@ -1642,31 +1927,20 @@ impl ConfigUi {
             .child(self.render_setting_rows(9, cx))
     }
 
-    fn render_keys_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let q = self.key_filter.clone();
-        let dupes = keybinds::find_conflicts(&self.bindings);
-        let bindings = self.bindings.clone();
-        let selected = self.selected_binding;
-
-        let row_matches =
-            |mods: &str, key: &str, act: &str| -> bool {
-                q.is_empty()
-                    || mods.to_lowercase().contains(&q)
-                    || key.to_lowercase().contains(&q)
-                    || act.to_lowercase().contains(&q)
-            };
-
-        let mut list = div().flex().flex_col().gap_1();
-        for (i, b) in bindings.iter().enumerate() {
-            let disp = action_display(b);
-            if !row_matches(&b.mods, &b.key, &disp) {
-                continue;
-            }
-            let is_dup = dupes.contains(&b.combo());
-            let is_sel = selected == Some(i);
-            let entity = cx.entity();
-            list = list.child(
-                div().flex().items_center().gap_3().px_2().py_1().rounded_sm().cursor_pointer()
+    /// 统一行高（24px）的键位列表行渲染，供 uniform_list 按可视范围回调。
+    fn render_key_row(&mut self, row: KeyRowKind, cx: &mut Context<Self>) -> AnyElement {
+        match row {
+            KeyRowKind::Custom(i) => {
+                let Some(b) = self.bindings.get(i).cloned() else {
+                    return div().h(px(24.)).w_full().into_any_element();
+                };
+                let is_dup = self.bindings.iter().filter(|x| x.combo() == b.combo()).count() > 1;
+                let is_sel = self.selected_binding == Some(i);
+                let is_disable_row = b.is_disable();
+                let disp = action_display(&b);
+                let entity = cx.entity();
+                div().h(px(24.)).w_full().flex().items_center().gap_3().px_2().rounded_sm()
+                    .cursor_pointer()
                     .when(is_sel, |d| d.bg(theme::bg_elevated()))
                     .when(!is_sel, |d| d.bg(theme::bg_panel()))
                     .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
@@ -1674,55 +1948,121 @@ impl ConfigUi {
                     })
                     .child(
                         div().w(px(150.)).text_size(px(12.)).font_family("JetBrains Mono")
-                            .text_color(if is_dup { theme::danger() } else { theme::fg_main() })
+                            .text_color(if is_dup {
+                                theme::danger()
+                            } else if is_disable_row {
+                                theme::fg_dim()
+                            } else {
+                                theme::fg_main()
+                            })
                             .child(format!("{}+{}", b.mods.replace('|', "+"), b.key)),
                     )
                     .child(
                         div().text_size(px(12.))
                             .text_color(if is_dup { theme::danger() } else { theme::fg_dim() })
                             .child(disp),
-                    ),
-            );
-        }
-        list = list.child(
-            div().mt_2().text_size(px(11.)).text_color(theme::fg_dim())
-                .child("── 默认键位（常用，只读） ──"),
-        );
-        if bindings.is_empty() {
-            list = list.child(
-                div().text_size(px(11.)).text_color(theme::fg_dim())
-                    .child("尚无自定义键位：在下方编辑器填写按键、选动作后，点「新增绑定」入列。"),
-            );
-        }
-        for (dm, dk, dact) in keybinds::DEFAULT_BINDINGS {
-            if !row_matches(dm, dk, dact) {
-                continue;
+                    )
+                    .into_any_element()
             }
-            let hit = bindings
-                .iter()
-                .any(|b| b.combo() == (keybinds::norm_mods(dm), dk.to_lowercase()));
-            list = list.child(
-                div().flex().items_center().gap_3().px_2().py_0p5().rounded_sm()
+            KeyRowKind::Default(j) => {
+                let Some((dm, dk, dact)) = keybinds::DEFAULT_BINDINGS
+                    .get(j)
+                    .map(|(m, k, a)| (m.to_string(), k.to_string(), *a))
+                else {
+                    return div().h(px(24.)).w_full().into_any_element();
+                };
+                let combo = (keybinds::norm_mods(&dm), dk.to_lowercase());
+                let mut is_disabled = false;
+                let mut is_hit = false;
+                for b in &self.bindings {
+                    if b.combo() == combo {
+                        if b.is_disable() {
+                            is_disabled = true;
+                        } else {
+                            is_hit = true;
+                        }
+                    }
+                }
+                let is_sel = self.selected_default == Some(j);
+                let combo_text = format!("{}+{}", dm.replace('|', "+"), dk);
+                let name_cn = default_binding_action_cn(dact);
+                let action_text =
+                    if is_disabled { format!("{name_cn}（已禁用）") } else { name_cn };
+                let entity = cx.entity();
+                div().h(px(24.)).w_full().flex().items_center().gap_3().px_2().rounded_sm()
+                    .cursor_pointer()
+                    .when(is_sel, |d| d.bg(theme::bg_elevated()))
+                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                        entity.update(app, |state: &mut ConfigUi, cx| state.select_default(j, cx));
+                    })
                     .child(
                         div().w(px(150.)).text_size(px(11.)).font_family("JetBrains Mono")
-                            .text_color(theme::fg_dim())
-                            .child(format!("{}+{}", dm.replace('|', "+"), dk)),
+                            .text_color(if is_sel { theme::fg_main() } else { theme::fg_dim() })
+                            .child(combo_text),
                     )
                     .child(
                         div().text_size(px(11.))
-                            .text_color(if hit { theme::accent() } else { theme::fg_dim() })
-                            .child(default_binding_action_cn(dact)),
-                    ),
-            );
+                            .text_color(if is_disabled {
+                                theme::fg_dim()
+                            } else if is_sel {
+                                theme::fg_main()
+                            } else if is_hit {
+                                theme::accent()
+                            } else {
+                                theme::fg_dim()
+                            })
+                            .child(action_text),
+                    )
+                    .into_any_element()
+            }
+            KeyRowKind::Divider => div()
+                .h(px(24.)).w_full().flex().items_center()
+                .text_size(px(11.)).text_color(theme::fg_dim())
+                .child("── 默认键位（可禁用；选中后用删除/恢复） ──")
+                .into_any_element(),
+            KeyRowKind::EmptyHint => div()
+                .h(px(24.)).w_full().flex().items_center()
+                .text_size(px(11.)).text_color(theme::fg_dim())
+                .child("尚无自定义键位：在下方选动作、录按键后，点「应用绑定」入列。")
+                .into_any_element(),
         }
+    }
+
+    fn render_keys_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        // 自定义行 + 分隔线 +（空提示）+ 默认行混入同一张定高表，
+        // 使选中行的自动滚动（scroll_to_item）对两个区域都成立。
+        let rows = build_key_rows(&self.bindings, &self.key_filter);
+        let row_count = rows.len();
+        let scroll_handle = self.keys_list_scroll.clone();
+        let list = uniform_list("keys-list", row_count, {
+            let entity = cx.entity();
+            move |range, _window, app: &mut App| {
+                range
+                    .filter_map(|ix| rows.get(ix).copied())
+                    .map(|row| {
+                        entity.update(app, |state: &mut ConfigUi, cx| {
+                            state.render_key_row(row, cx)
+                        })
+                    })
+                    .collect::<Vec<_>>()
+            }
+        })
+        .track_scroll(&scroll_handle)
+        .h(px(320.))
+        .w_full();
 
         // 编辑器面板：无选中时提示；有选中时显示字段 + 应用/删除
         let capture_label = if self.capture_mode { "请按下组合键… (Esc 取消)" } else { "录入按键" };
-        // 编辑器三步布局（用户直觉流程）：①选动作 → ②录按键 → ③添加。
+        // 编辑器三步布局（用户直觉流程）：①选动作 → ②录按键 → ③应用。
         // 步骤标号直接写在界面上，不需要说明书也能看懂顺序。
         let step_label = |text: &str| {
             div().text_size(px(11.)).text_color(theme::fg_dim()).child(text.to_string())
         };
+        // 未选动作时录入区真正禁用：输入框不可聚焦/不可输入（TextInput 禁用态），
+        // 「录入按键」按钮点击无响应，整行半透明——流程起点是选动作。
+        // 选动作标签或点选列表行后解禁（见 select_action_tag / select_binding）。
+        let no_action = self.edit_action.is_none() && self.custom_action.is_none();
+        let delete_target = self.delete_target();
         let editor = div().flex().flex_col().gap_2()
             .p_2().rounded_md()
             .bg(theme::bg_panel())
@@ -1749,11 +2089,7 @@ impl ConfigUi {
                             .when(!is_sel, |d| d.bg(theme::bg_elevated()).text_color(theme::fg_dim()))
                             .child(*label)
                             .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
-                                entity.update(app, |state: &mut ConfigUi, cx| {
-                                    state.edit_action = Some(idx);
-                                    state.custom_action = None;
-                                    cx.notify();
-                                });
+                                entity.update(app, |state: &mut ConfigUi, cx| state.select_action_tag(idx, cx));
                             })
                     }),
                 ),
@@ -1767,6 +2103,7 @@ impl ConfigUi {
             .child(step_label("第二步：录入按键（点按钮后直接按组合键）"))
             .child(
                 div().flex().items_center().gap_2()
+                    .opacity(if no_action { 0.5 } else { 1.0 })
                     .child(lbl("修饰键"))
                     .child(self.input(&self.edit_mods_input))
                     .child(lbl("键名"))
@@ -1776,31 +2113,46 @@ impl ConfigUi {
                             .bg(if self.capture_mode { theme::accent_dim() } else { theme::bg_elevated() })
                             .text_size(px(12.)).text_color(theme::fg_main())
                             .child(capture_label)
-                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| {
-                                this.capture_mode = !this.capture_mode;
-                                // 按键事件只沿焦点路径冒泡:不聚焦时容器的 on_key_down
-                                // 截不到任何键,用户就得先手动点一下输入框——进入捕获态
-                                // 直接聚焦键名框,按下组合键即被截获。
-                                if this.capture_mode {
-                                    if let Some(input) = &this.edit_key_input {
-                                        let handle = input.read(cx).focus_handle(cx);
-                                        window.focus(&handle, cx);
+                            // 未选动作时禁用：不挂点击事件，按钮点不动
+                            .when(!no_action, |d| {
+                                d.on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, window, cx| {
+                                    this.capture_mode = !this.capture_mode;
+                                    // 按键事件只沿焦点路径冒泡:不聚焦时容器的 on_key_down
+                                    // 截不到任何键,用户就得先手动点一下输入框——进入捕获态
+                                    // 直接聚焦键名框,按下组合键即被截获。
+                                    if this.capture_mode {
+                                        if let Some(input) = &this.edit_key_input {
+                                            let handle = input.read(cx).focus_handle(cx);
+                                            window.focus(&handle, cx);
+                                        }
                                     }
-                                }
-                                cx.notify();
-                            })),
+                                    cx.notify();
+                                }))
+                            }),
                     ),
             )
-            .child(step_label("第三步：添加（或先在上方列表选中一行后修改/删除）"))
+            .child(step_label("第三步：应用或删除绑定"))
             .child(
                 div().flex().gap_2()
-                    // 与 SSH 连接页同一交互模型:未选中行时不显示「应用修改/
-                    // 删除此绑定」——无选中时它们没有可写回的目标。
-                    .when(selected.is_some(), |d| {
-                        d.child(btn("应用修改", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(true, cx))))
-                            .child(btn("删除此绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_binding(cx))))
-                    })
-                    .child(btn("添加键绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.commit_editor(false, cx)))),
+                    // 「应用绑定」= 旧「添加键绑定」/「应用修改」的合体：
+                    // 按动作 (name+arg) 找现有行 → 覆盖；找不到 → 追加。
+                    .child(btn("应用绑定", cx.listener(|this, _: &MouseDownEvent, _, cx| this.apply_binding(cx))))
+                    // 删除按钮仅在存在可删对象（高亮选中行）时出现：
+                    // 自定义行→「删除绑定」移除；默认键→「删除绑定」= 写入禁用占位，
+                    // 已禁用的默认键则显示「恢复默认」= 移除禁用占位。
+                    .when_some(delete_target, |d, target| {
+                        let label = match target {
+                            DeleteTarget::DefaultRestore(_) => "恢复默认",
+                            _ => "删除绑定",
+                        };
+                        d.child(
+                            div().px_2().py_1().rounded_sm().cursor_pointer()
+                                .bg(theme::bg_elevated())
+                                .text_size(px(12.)).text_color(theme::fg_main())
+                                .child(label)
+                                .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_binding(cx))),
+                        )
+                    }),
             );
 
         div().flex().flex_col().gap_3()
@@ -1821,7 +2173,7 @@ impl ConfigUi {
                     .child(div().w(px(120.)).text_size(px(13.)).text_color(theme::fg_main()).child("搜索"))
                     .child(self.input(&self.key_search)),
             )
-            .child(list.h(px(320.)).id("keys-list").overflow_y_scroll())
+            .child(list)
             .child(editor)
     }
 }

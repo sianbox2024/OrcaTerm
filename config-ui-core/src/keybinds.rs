@@ -4,6 +4,11 @@
 
 use serde_json::Value;
 
+/// 无参动作：写进 config.keys 后，加载层会把同组合键的内置默认动作移除
+///（wezterm-gui inputmap.rs 在注册完默认表后按此动作 retain）。
+/// GUI 用它表达「禁用某条默认键位」；删除该条目即恢复默认。
+pub const DISABLE_DEFAULT_ASSIGNMENT: &str = "DisableDefaultAssignment";
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {
     pub mods: String,
@@ -28,6 +33,30 @@ pub fn norm_mods(m: &str) -> String {
 impl Binding {
     pub fn combo(&self) -> (String, String) {
         (norm_mods(&self.mods), self.key.to_lowercase())
+    }
+
+    /// 此条目是否为「禁用默认键位」占位（与普通动作绑定语义相反）。
+    pub fn is_disable(&self) -> bool {
+        self.action_name == DISABLE_DEFAULT_ASSIGNMENT
+    }
+}
+
+/// 加载链路读回的键名归一化到发射侧词表。
+/// 裸写的 Enter/Tab/Backspace/Escape/Delete 在 config::keys::DeferredKeyCode
+/// 解析时 mapped 名能解析、phys 名却错位（物理键叫 Return 等），于是塌缩成
+/// `KeyCode::Char(控制字符)`，序列化为 `mapped:<char>`（如 `mapped:\r`）；
+/// 不还原就无法与 DEFAULT_BINDINGS 的键名比对，禁用/改绑判定会全部失配。
+fn normalize_loaded_key(raw: &str) -> String {
+    let Some(rest) = raw.strip_prefix("mapped:") else {
+        return raw.to_string();
+    };
+    match rest {
+        "\r" => "Enter".into(),
+        "\t" => "Tab".into(),
+        "\u{8}" => "Backspace".into(),
+        "\u{1b}" => "Escape".into(),
+        "\u{7f}" => "Delete".into(),
+        other => other.to_string(),
     }
 }
 
@@ -56,9 +85,10 @@ pub fn parse_bindings(snap: &Value) -> Vec<Binding> {
             Value::String(s) => (s.clone(), String::new()),
             _ => ("UNKNOWN".into(), String::new()),
         };
+        let raw_key = k.get("key").and_then(|m| m.as_str()).unwrap_or("");
         out.push(Binding {
             mods: k.get("mods").and_then(|m| m.as_str()).unwrap_or("").to_string(),
-            key: k.get("key").and_then(|m| m.as_str()).unwrap_or("").to_string(),
+            key: normalize_loaded_key(raw_key),
             action_name: name,
             action_arg: arg,
         });
@@ -207,7 +237,7 @@ pub const DEFAULT_BINDINGS: &[(&str, &str, &str)] = &[
     ("CTRL|SHIFT", "f", "Search"),
     ("CTRL|SHIFT", "k", "ClearScrollback"),
     ("CTRL|SHIFT", "z", "TogglePaneZoomState"),
-    ("ALT|ENTER", "Enter", "ToggleFullScreen"),
+    ("ALT", "Enter", "ToggleFullScreen"),
     ("CTRL", "-", "DecreaseFontSize"),
     ("CTRL", "=", "IncreaseFontSize"),
     ("CTRL", "0", "ResetFontSize"),
@@ -230,6 +260,43 @@ pub fn hits_default(mods: &str, key: &str) -> bool {
     DEFAULT_BINDINGS
         .iter()
         .any(|(dm, dk, _)| norm_mods(dm) == m && *dk == k)
+}
+
+/// 反解 DEFAULT_BINDINGS 第三列动作文本为 (变体名, 参数)：
+/// "SpawnTab" → ("SpawnTab","")；"CopyTo 'Clipboard'" → ("CopyTo","Clipboard")；
+/// "ActivateTabRelative(-1)" → ("ActivateTabRelative","-1")。
+/// 文本格式由本表常量固定，三种形态穷举，不解析任意 Lua。
+fn split_default_action_text(text: &str) -> (String, String) {
+    if let (Some(open), Some(close)) = (text.find('('), text.find(')')) {
+        if open < close {
+            return (text[..open].to_string(), text[open + 1..close].to_string());
+        }
+    }
+    if let Some(open) = text.find('\'') {
+        if let Some(close) = text.rfind('\'') {
+            if close > open {
+                return (text[..open].trim_end().to_string(), text[open + 1..close].to_string());
+            }
+        }
+    }
+    (text.to_string(), String::new())
+}
+
+/// 默认表第 row 行对应的动作 (变体名, 参数)；越界返回 None。
+pub fn default_action_at(row: usize) -> Option<(String, String)> {
+    DEFAULT_BINDINGS.get(row).map(|(_, _, text)| split_default_action_text(text))
+}
+
+/// 某动作在默认键位表中的行号与组合键（mods 原样、key 原样）。
+/// 无默认键的动作（如 SplitHorizontal）返回 None。
+pub fn default_binding_for_action(name: &str, arg: &str) -> Option<(usize, String, String)> {
+    DEFAULT_BINDINGS
+        .iter()
+        .enumerate()
+        .find_map(|(row, (dm, dk, text))| {
+            let (n, a) = split_default_action_text(text);
+            (n == name && a == arg).then(|| (row, (*dm).to_string(), (*dk).to_string()))
+        })
 }
 
 #[cfg(test)]
@@ -320,5 +387,81 @@ mod tests {
         assert!(hits_default("CTRL|SHIFT", "c"));
         assert!(!hits_default("CTRL|SHIFT", "y"));
         assert!(!hits_default("ALT|SHIFT", "c"));
+    }
+
+    #[test]
+    fn default_action_text_splits_into_name_and_arg() {
+        assert_eq!(
+            split_default_action_text("SpawnTab"),
+            ("SpawnTab".to_string(), String::new())
+        );
+        assert_eq!(
+            split_default_action_text("CopyTo 'Clipboard'"),
+            ("CopyTo".to_string(), "Clipboard".to_string())
+        );
+        assert_eq!(
+            split_default_action_text("ActivateTabRelative(-1)"),
+            ("ActivateTabRelative".to_string(), "-1".to_string())
+        );
+    }
+
+    #[test]
+    fn action_lookup_hits_default_row_and_combo() {
+        // 无参 / 字符串参数 / 数字参数三种形态各取一个
+        assert_eq!(
+            default_binding_for_action("ToggleFullScreen", ""),
+            Some((16, "ALT".to_string(), "Enter".to_string()))
+        );
+        assert_eq!(
+            default_binding_for_action("CopyTo", "Clipboard").map(|(r, m, _)| (r, m)),
+            Some((0, "CTRL|SHIFT".to_string()))
+        );
+        assert_eq!(
+            default_binding_for_action("ActivateTabRelative", "1")
+                .map(|(r, _, _)| r),
+            Some(21)
+        );
+        // 动作存在但没有默认键（水平/垂直分割走用户自定义）
+        assert_eq!(default_binding_for_action("SplitHorizontal", ""), None);
+        // default_action_at 与正向查询一致
+        let (row, _, _) = default_binding_for_action("ToggleFullScreen", "").unwrap();
+        assert_eq!(default_action_at(row), Some(("ToggleFullScreen".to_string(), String::new())));
+        assert_eq!(default_action_at(DEFAULT_BINDINGS.len()), None);
+    }
+
+    #[test]
+    fn disable_default_assignment_roundtrips_through_loader() {
+        let binding = Binding {
+            mods: "ALT".into(),
+            key: "Enter".into(),
+            action_name: DISABLE_DEFAULT_ASSIGNMENT.into(),
+            action_arg: String::new(),
+        };
+        assert!(binding.is_disable());
+        let lua = emit_bindings(&[binding.clone()]);
+        assert!(lua.contains("wezterm.action.DisableDefaultAssignment"), "{lua}");
+        let src = format!("local config = {{}}\n{lua}return config\n");
+        let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
+        let snap = crate::load::config_to_json(&loaded.config);
+        let back = parse_bindings(&snap);
+        assert_eq!(back.len(), 1);
+        assert_eq!(back[0].combo(), binding.combo());
+        // 裸 Enter 经加载链路会塌缩成 mapped:\r，读回端必须还原成 Enter
+        assert_eq!(back[0].key, "Enter");
+        assert_eq!(back[0].action_name, DISABLE_DEFAULT_ASSIGNMENT);
+        assert_eq!(back[0].action_arg, "");
+        assert!(back[0].is_disable());
+    }
+
+    #[test]
+    fn loaded_control_char_keys_map_back_to_named_keys() {
+        assert_eq!(normalize_loaded_key("mapped:\r"), "Enter");
+        assert_eq!(normalize_loaded_key("mapped:\t"), "Tab");
+        assert_eq!(normalize_loaded_key("mapped:\u{8}"), "Backspace");
+        assert_eq!(normalize_loaded_key("mapped:\u{1b}"), "Escape");
+        assert_eq!(normalize_loaded_key("mapped:\u{7f}"), "Delete");
+        // 具名键与普通字符原样返回
+        assert_eq!(normalize_loaded_key("PageUp"), "PageUp");
+        assert_eq!(normalize_loaded_key("mapped:c"), "c");
     }
 }

@@ -3633,35 +3633,77 @@ impl TermWindow {
             .unwrap_or(false)
     }
 
-    /// SFTP 按钮/CTRL+SHIFT+F:拉起该 SSH 连接配置的外部 SFTP 工具命令
-    /// (如 WinSCP:"D:\Program Files (x86)\WinSCP\WinSCP.exe" "会话名" /Desktop)。
+    /// SFTP 按钮/CTRL+SHIFT+F:拉起该 SSH 连接配置的外部 SFTP 工具程序（如 WinSCP）。
     /// 产品决策:SFTP 功能由第三方工具承担,自研窗口已移除。
-    /// 命令在配置界面每个 SSH 连接的「SFTP 命令」里填写;未配置时 toast 提示。
+    /// sftp_command 字段存的是工具程序路径；命令行参数（用户名、主机、端口、密钥）
+    /// 由本函数从 SSH 域配置自动拼凑。WinSCP 仅认 .ppk 私钥，密钥路径的扩展名
+    /// 自动替换为 .ppk（id_ed25519 → id_ed25519.ppk）。
+    /// 未配置程序路径时 toast 提示。
     pub fn launch_sftp_tool(&mut self) {
         // 域判定取 mux 侧真实 pane(与 active_pane_is_ssh 同源,规避 overlay 陷阱)
         let mux = Mux::get();
-        let domain_name = mux
+        let domain = mux
             .get_active_tab_for_window(self.mux_window_id)
             .and_then(|tab| tab.get_active_pane())
-            .and_then(|pane| mux.get_domain(pane.domain_id()))
-            .map(|domain| domain.domain_name().to_string());
-        let Some(domain_name) = domain_name else {
+            .and_then(|pane| mux.get_domain(pane.domain_id()));
+        let Some(domain) = domain else {
             return;
         };
-        let command = config::configuration()
+        let domain_name = domain.domain_name().to_string();
+        let ssh_domain = config::configuration()
             .ssh_domains()
-            .iter()
-            .find(|d| d.name == domain_name)
-            .map(|d| d.sftp_command.trim().to_string())
-            .unwrap_or_default();
-        if command.is_empty() {
+            .into_iter()
+            .find(|d| d.name == domain_name);
+        let Some(ssh_domain) = ssh_domain else {
+            return;
+        };
+        let program = ssh_domain.sftp_command.trim();
+        if program.is_empty() {
             wezterm_toast_notification::persistent_toast_notification(
                 "SFTP",
                 &format!(
-                    "连接「{domain_name}」未配置 SFTP 命令：请在配置界面的 SSH 连接中填写（例如拉起 WinSCP 的命令行）"
+                    "连接「{domain_name}」未配置 SFTP 程序路径：请在配置界面的 SSH 连接中选择 SFTP 工具程序（如 WinSCP.exe）"
                 ),
             );
             return;
+        }
+        // 拼凑 WinSCP 命令行："{程序}" sftp://user@host:port/ /privatekey="key.ppk"
+        let username = ssh_domain.username.as_deref().unwrap_or("");
+        let (host, port) = match ssh_domain.remote_address.rsplit_once(':') {
+            Some((h, p)) => (h, p),
+            None => (ssh_domain.remote_address.as_str(), "22"),
+        };
+        let url = if username.is_empty() {
+            format!("sftp://{host}:{port}/")
+        } else {
+            format!("sftp://{username}@{host}:{port}/")
+        };
+        // WinSCP 仅支持 .ppk 私钥：把 identityfile 的扩展名替换为 .ppk
+        let identityfile = ssh_domain
+            .ssh_option
+            .get("identityfile")
+            .map(|s| s.as_str())
+            .unwrap_or("");
+        let ppk_path = if identityfile.is_empty() {
+            String::new()
+        } else {
+            let p = std::path::Path::new(identityfile);
+            match p.file_stem() {
+                Some(stem) => {
+                    let stem = stem.to_string_lossy().to_string();
+                    match p.parent() {
+                        Some(dir) if !dir.as_os_str().is_empty() => {
+                            dir.join(format!("{stem}.ppk")).to_string_lossy().to_string()
+                        }
+                        _ => format!("{stem}.ppk"),
+                    }
+                }
+                None => format!("{identityfile}.ppk"),
+            }
+        };
+        let mut command = format!("\"{program}\" {url}");
+        if !ppk_path.is_empty() {
+            command.push_str(&format!(" /privatekey=\"{ppk_path}\""));
         }
         log::info!("launch sftp tool for `{domain_name}`: {command}");
         crate::spawn::shell_execute_command_line(&command);

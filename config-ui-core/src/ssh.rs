@@ -54,7 +54,8 @@ pub struct SshConnection {
     /// 连接后执行的命令（如 `cd /data/project`）；空 = 直接进默认 shell。
     /// 发射时包装为 default_prog={'sh','-c','<命令>; exec $SHELL'}。
     pub initial_command: String,
-    /// 点标签栏 SFTP 按钮时对该连接执行的外部命令（如拉起 WinSCP）；
+    /// 点标签栏 SFTP 按钮时拉起的外部 SFTP 工具程序路径（如 WinSCP.exe）；
+    /// 运行时由 orca-term 自动拼凑完整命令行，密钥自动改用 .ppk 后缀。
     /// 空 = 按钮提示未配置。产品决策：SFTP 功能由第三方工具承担。
     pub sftp_command: String,
 }

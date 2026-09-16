@@ -248,6 +248,8 @@ fn spawn_elevated_instance(spawn: &SpawnCommand) -> anyhow::Result<()> {
 pub fn shell_execute_command_line(command: &str) {
     use std::ffi::OsStr;
     use std::os::windows::ffi::OsStrExt;
+    use winapi::um::combaseapi::{CoInitializeEx, CoUninitialize};
+    use winapi::um::objbase::COINIT_APARTMENTTHREADED;
     use winapi::um::shellapi::ShellExecuteW;
     use winapi::um::winuser::SW_SHOWNORMAL;
 
@@ -275,22 +277,33 @@ pub fn shell_execute_command_line(command: &str) {
     let verb = wide("open");
     let file_w = wide(file);
     let params_w = wide(parameters);
-    let result = unsafe {
-        ShellExecuteW(
+    let command = command.to_string();
+    // ShellExecuteW 严禁在 UI 线程同步调用：其内部的 COM 激活/SmartScreen 检查
+    // 会向调用线程的窗口同步派发消息（重入 wnd_proc），与外层点击处理器持有的
+    // RefCell borrow 冲突，panic 后整进程退出（SSH 输出活跃时点 SFTP 必现）。
+    // 挪到无窗口的工作线程执行，重入无从发生；线程随调用返回即结束。
+    std::thread::spawn(move || unsafe {
+        let hr = CoInitializeEx(std::ptr::null_mut(), COINIT_APARTMENTTHREADED);
+        if hr < 0 {
+            log::error!("SFTP 命令执行失败（COM 初始化 {hr:#x}）：{command}");
+            return;
+        }
+        let result = ShellExecuteW(
             std::ptr::null_mut(),
             verb.as_ptr(),
             file_w.as_ptr(),
             params_w.as_ptr(),
             std::ptr::null(),
             SW_SHOWNORMAL,
-        )
-    };
-    if result as i32 <= 32 {
-        log::error!(
-            "SFTP 命令执行失败（ShellExecuteW 错误码 {}）：{command}",
-            result as i32
         );
-    }
+        if result as i32 <= 32 {
+            log::error!(
+                "SFTP 命令执行失败（ShellExecuteW 错误码 {}）：{command}",
+                result as i32
+            );
+        }
+        CoUninitialize();
+    });
 }
 
 #[cfg(not(windows))]

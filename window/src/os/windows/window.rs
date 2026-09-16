@@ -1689,7 +1689,14 @@ unsafe fn wm_kill_focus(
 
 unsafe fn wm_paint(hwnd: HWND, _msg: UINT, _wparam: WPARAM, _lparam: LPARAM) -> Option<LRESULT> {
     let inner = rc_from_hwnd(hwnd)?;
-    let mut inner = inner.borrow_mut();
+    // 外部阻塞调用（如 ShellExecuteW 的 COM 激活检查）会向本线程窗口同步派发
+    // 消息重入本处理器，此时外层（点击处理器等）可能正持有 borrow。借不到就不
+    // BeginPaint——失效区保持，Windows 会继续重发 WM_PAINT，外层释放后正常重绘；
+    // 若真借则 panic，被 catch 后整进程退出。
+    let mut inner = match inner.try_borrow_mut() {
+        Ok(inner) => inner,
+        Err(_) => return Some(0),
+    };
 
     if inner.paint_throttled {
         inner.invalidated = true;
