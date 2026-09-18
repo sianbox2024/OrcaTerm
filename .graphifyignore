@@ -1,5 +1,18 @@
-# graphify-rs 扫描忽略清单：排除构建产物与工具目录，缩短重建时间、避免自引用
-target/
-.git/
-Temp/graphify-rs-out/
-Temp/pty-exit-probe/
+# graphify-rs 扫描忽略清单
+#
+# 匹配语义（见 graphify-detect/src/ignore.rs）：
+#   - 只有「不含 / 的模式」才会逐段匹配路径组件，所以排除目录请直接写目录名
+#   - 带尾斜杠的模式（如 foo/）只做整体 glob 匹配，命中不了 foo/bar.rs
+#   - target / .git / dist / build 已在内置 SKIP_DIRS 中，无需重复列出
+
+# 图谱自身产物与临时目录（避免自引用：产物里的 wiki/*.md 会被当成文档扫描）
+graphify-rs-out
+pty-exit-probe
+
+# 第三方 vendored / 参考源码，不属于 OrcaTerm 自身代码：
+#   Ref-src 是 zed 的本地参考副本（.gitignore 已忽略，0 个受跟踪文件）
+#   deps    是 vendored 的 freetype/harfbuzz/cairo/libpng/zlib 等 C 库
+# 不排除时：4538 个扫描文件中仅 775 个是本项目代码，图谱会被 pngvalid、
+# editor_tests 之类第三方实体淹没，query 结果与项目无关。
+Ref-src
+deps
