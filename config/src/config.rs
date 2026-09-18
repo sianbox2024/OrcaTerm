@@ -1152,6 +1152,27 @@ return config
         let portable_config = std::env::current_exe()
             .ok()
             .and_then(|exe| exe.parent().map(|dir| dir.join("orca-config.lua")));
+        // orca-term: 陈旧 WEZTERM_CONFIG_FILE 自愈（Issue/5.png）。
+        // try_load 成功后会 set_var("WEZTERM_CONFIG_FILE", p) 污染本进程环境；
+        // 若用户随后删掉 orca-config.lua（不重启进程触发热重载/开新窗口），
+        // 该环境变量仍指向已不存在的文件，会以 required 路径入队导致
+        // "Error opening ... (os error 2)" 弹窗，且毒化残留（末尾 remove_var
+        // 走不到）。便携配置本身是 optional 的，缺失应自生成+回默认值，
+        // 故此处若环境变量恰好等于便携路径且文件已不存在，先清除它，
+        // 让下面的自生成 + optional/try_default 接管。
+        if let (Some(portable), Some(env_path)) = (
+            portable_config.as_ref(),
+            std::env::var_os("WEZTERM_CONFIG_FILE"),
+        ) {
+            if PathBuf::from(&env_path) == *portable && !portable.exists() {
+                log::info!(
+                    "便携配置 {} 已不存在，清除陈旧的 WEZTERM_CONFIG_FILE 后按缺失处理",
+                    portable.display()
+                );
+                std::env::remove_var("WEZTERM_CONFIG_FILE");
+                std::env::remove_var("WEZTERM_CONFIG_DIR");
+            }
+        }
         // 便携配置缺失时先生成默认文件，再走下面的正常加载路径，
         // 使默认值在本次启动立即生效；WEZTERM_CONFIG_FILE / 内部 override
         // 的开发通道下不生成，避免文件副作用。

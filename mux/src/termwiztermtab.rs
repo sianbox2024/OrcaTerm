@@ -108,7 +108,9 @@ impl TermWizTerminalPane {
         let terminal = Mutex::new(wezterm_term::Terminal::new(
             size,
             term_config.unwrap_or_else(|| Arc::new(config::TermConfig::new())),
-            "WezTerm",
+            // orca-term 品牌化：错误窗/连接 UI pane 的默认标题，
+            // 此前为上游硬编码 "WezTerm"（Issue/5.png 中 Tab 文本来源之一）。
+            "OrcaTerm",
             config::wezterm_version(),
             Box::new(Vec::new()), // FIXME: connect to something?
         ));

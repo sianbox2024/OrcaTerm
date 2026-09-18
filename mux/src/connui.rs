@@ -436,7 +436,9 @@ fn get_error_window() -> ConnectionUI {
     }
 
     let ui = ConnectionUI::new_with_no_close_delay();
-    ui.title("wezterm Configuration Error");
+    // orca-term 品牌化：错误窗标题此前为上游硬编码 "wezterm Configuration Error"，
+    // 配置缺失时会同时显示在 OS 窗口标题和 Tab 文本上（Issue/5.png）。
+    ui.title("OrcaTerm Configuration Error");
     err.replace(ui.clone());
     ui
 }
