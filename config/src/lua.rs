@@ -218,9 +218,30 @@ pub fn make_lua_context(config_file: &Path) -> anyhow::Result<Lua> {
         // This table will be the `wezterm` module in the script
         let wezterm_mod = get_or_create_module(&lua, "wezterm")?;
 
+        // 注意：Lua 5.4 的 loadlib.c::setprogdir() 用 GetModuleFileNameA 取 exe 目录
+        // （ANSI 代码页，中文 Windows 上是 GBK），再把 LUA_PATH_DEFAULT 里的 `!`
+        // 替换成该目录。exe 路径含中文时 package.path 天然不是合法 UTF-8，
+        // 不能直接 package.get::<String>()，否则中文目录下启动即炸：
+        //   make_lua_context: get package.path as String:
+        //   error converting Lua string to String (invalid utf-8 ...)
+        // 改用字节级读取 + lossy 解码；被 GBK 污染的条目（含 U+FFFD）丢弃，
+        // 下面用 Rust 侧 current_exe()（UTF-16，中文安全）重建同等条目。
         let package: Table = globals.get("package").context("get _G.package")?;
-        let package_path: String = package.get("path").context("get package.path as String")?;
-        let mut path_array: Vec<String> = package_path.split(";").map(|s| s.to_owned()).collect();
+        let package_path: mlua::String = package.get("path").context("get _G.package.path")?;
+        let package_path = package_path.to_string_lossy();
+        let mut path_array: Vec<String> = package_path
+            .split(';')
+            .filter(|s| !s.is_empty() && !s.contains('\u{FFFD}'))
+            .map(|s| s.to_owned())
+            .collect();
+        let filtered_out = package_path.split(';').filter(|s| s.contains('\u{FFFD}')).count();
+        if filtered_out > 0 {
+            log::warn!(
+                "package.path 含 {} 条非 UTF-8 条目（exe 目录含中文且 Lua 用 ANSI 取目录），\
+                 已丢弃并用 UTF-8 重建；本次启动不受影响",
+                filtered_out
+            );
+        }
 
         fn prefix_path(array: &mut Vec<String>, path: &Path) {
             array.insert(0, format!("{}/?.lua", path.display()));
@@ -249,6 +270,22 @@ pub fn make_lua_context(config_file: &Path) -> anyhow::Result<Lua> {
                     // For a portable windows install, force in this path ahead
                     // of the rest
                     prefix_path(&mut path_array, &path.join("wezterm_modules"));
+                    if filtered_out > 0 {
+                        // 上面丢掉的就是 Lua 默认模板里以 `!` 开头的 exe 目录条目
+                        // （`!\\lua\\?.lua` 等 6 条，见 lua-5.4 luaconf.h
+                        // LUA_PATH_DEFAULT），用 Rust 侧 UTF-8 目录重建，
+                        // 否则中文目录下 require exe 自带 lua 模块会找不到。
+                        for sub in [
+                            "lua/?.lua",
+                            "lua/?/init.lua",
+                            "?.lua",
+                            "?/init.lua",
+                            "../share/lua/5.4/?.lua",
+                            "../share/lua/5.4/?/init.lua",
+                        ] {
+                            path_array.insert(0, format!("{}/{}", path.display(), sub));
+                        }
+                    }
                 }
             }
         }
