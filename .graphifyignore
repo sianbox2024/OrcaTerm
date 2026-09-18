@@ -1,25 +1,40 @@
 # graphify-rs 扫描忽略清单
 #
 # 匹配语义（见 graphify-detect/src/ignore.rs）：
-#   - 只有「不含 / 的模式」才会逐段匹配路径组件，所以排除目录请直接写目录名
-#   - 带尾斜杠的模式（如 foo/）只做整体 glob 匹配，命中不了 foo/bar.rs
-#   - target / .git / dist / build 已在内置 SKIP_DIRS 中，无需重复列出
+#   - 不含 / 的模式：逐段匹配路径组件（可剪枝任意层级的同名目录/文件，会提前终止遍历）
+#   - 含 / 的模式：按整条相对路径做 glob，跨多级必须用 **
+#     （实测 Temp/** 能命中 Temp/sub/deep/x.rs；而尾斜杠写法 Temp/ 命不中任何实际路径）
+#   - 内置 SKIP_DIRS：venv .venv env .env node_modules __pycache__ .git dist build
+#     target out site-packages lib64 .pytest_cache .mypy_cache .ruff_cache .tox .eggs
+#   - 所有以点号开头的目录会被自动跳过
+#
+# 重要：graphify-rs 只读本文件，不解析 .gitignore。因此 .gitignore 命中的路径
+# 必须在此显式表达，否则会被扫进图谱（历史事故：Ref-src/ 曾扫入 2570 个文件）。
 
-# 图谱自身产物与临时目录（避免自引用：产物里的 wiki/*.md 会被当成文档扫描）
-graphify-rs-out
-pty-exit-probe
-
-# 第三方 vendored / 参考源码，不属于 OrcaTerm 自身代码：
-#   Ref-src 是 zed 的本地参考副本（.gitignore 已忽略，0 个受跟踪文件）
-#   deps    是 vendored 的 freetype/harfbuzz/cairo/libpng/zlib 等 C 库
-# 不排除时：4538 个扫描文件中仅 775 个是本项目代码，图谱会被 pngvalid、
-# editor_tests 之类第三方实体淹没，query 结果与项目无关。
-Ref-src
-deps
-
-# 被 .gitignore 忽略、但不在内置 SKIP_DIRS 里的本地产物/素材：
-# graphify-rs 只读 .graphifyignore，不解析 .gitignore，这类路径必须在此显式排除。
-#   build-id.txt  每次构建由 build.ps1/build.sh 重写的构建号（实测曾混入图谱）
-#   Issue         本地问题截图目录（.gitignore 中 /Issue/）
+# ===== 一、由 .gitignore 派生：.gitignore 命中者一律不得进入图谱 =====
+# 重新生成的命令（在仓库根执行，目录补 /**，文件原样）：
+#   git ls-files --others --ignored --exclude-standard --directory \
+#     | sed 's:/$::' | while read -r p; do
+#         case "$p" in
+#           */*) printf '%s/**\n' "$p" ;;
+#           *)   printf '%s\n%s/**\n' "$p" "$p" ;;
+#         esac
+#       done
 build-id.txt
 Issue
+Issue/**
+Ref-src
+Ref-src/**
+Temp
+Temp/**
+target
+target/**
+dist
+dist/**
+config-ui/target/**
+
+# ===== 二、有意额外排除（超出 .gitignore，仅为图谱可用性）=====
+# deps/ 是受 git 跟踪的 vendored C 库（freetype/harfbuzz/cairo/libpng/zlib，1193 个文件）。
+# 不排除时图谱 83% 是第三方实体（pngvalid、editor_tests 等），query 结果与项目无关。
+# 若要连第三方源码一并索引，删除下面这行后重建即可。
+deps
