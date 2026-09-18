@@ -16,3 +16,10 @@ pty-exit-probe
 # editor_tests 之类第三方实体淹没，query 结果与项目无关。
 Ref-src
 deps
+
+# 被 .gitignore 忽略、但不在内置 SKIP_DIRS 里的本地产物/素材：
+# graphify-rs 只读 .graphifyignore，不解析 .gitignore，这类路径必须在此显式排除。
+#   build-id.txt  每次构建由 build.ps1/build.sh 重写的构建号（实测曾混入图谱）
+#   Issue         本地问题截图目录（.gitignore 中 /Issue/）
+build-id.txt
+Issue
