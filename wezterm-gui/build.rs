@@ -12,8 +12,15 @@ fn main() {
 
     println!("cargo:rerun-if-changed=build.rs");
 
-    #[cfg(windows)]
-    {
+    // 必须按「目标平台」判断，不能用 #[cfg(windows)]：本工程在 Linux 上交叉编译
+    // x86_64-pc-windows-gnu，宿主不是 Windows，#[cfg(windows)] 恒为假，整块会被
+    // 静默跳过，后果是：
+    //   1) exe 不含 RT_MANIFEST → 缺 dpiAwareness=PerMonitorV2，系统按 DPI 不感知
+    //      处理，屏幕缩放 >100% 时整个窗口被位图拉伸、字体发虚；也缺
+    //      activeCodePage=UTF-8；
+    //   2) 缺应用图标与版本信息（资源管理器/任务栏/文件属性全空白）；
+    //   3) conpty/ANGLE/mesa 运行时 DLL 不会被复制到产物目录。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         use anyhow::Context as _;
         use std::io::Write;
         use std::path::Path;
@@ -22,7 +29,15 @@ fn main() {
             .ok()
             .and_then(|cwd| cwd.parent().map(|p| p.to_path_buf()))
             .unwrap();
-        let exe_output_dir = repo_dir.join("target").join(profile);
+        // OUT_DIR 形如 <target-dir>/<triple>/<profile>/build/<pkg>-<hash>/out，
+        // 上溯 3 级即产物目录：交叉编译得到 target/<triple>/<profile>，
+        // 本地编译得到 target/<profile>，两种情形都正确。
+        let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+        let exe_output_dir = out_dir
+            .ancestors()
+            .nth(3)
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| repo_dir.join("target").join(profile));
         let windows_dir = repo_dir.join("assets").join("windows");
 
         let conhost_dir = windows_dir.join("conhost");
@@ -114,8 +129,10 @@ fn main() {
 #include <winres.h>
 // This ID is coupled with code in window/src/os/windows/window.rs
 #define IDI_ICON 0x101
-1 RT_MANIFEST "{win}\\manifest.manifest"
-IDI_ICON ICON "{win}\\terminal.ico"
+// 路径必须用正斜杠：windres 会把反斜杠当转义符而报「无法打开文件」，
+// rc.exe 也接受正斜杠，故统一用正斜杠以兼容 Windows/Linux 两种宿主。
+1 RT_MANIFEST "{win}/manifest.manifest"
+IDI_ICON ICON "{win}/terminal.ico"
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION     1,0,0,0
 PRODUCTVERSION  1,0,0,0
@@ -145,7 +162,7 @@ BEGIN
     END
 END
 "#,
-            win = windows_dir.display().to_string().replace("\\", "\\\\"),
+            win = windows_dir.display().to_string().replace('\\', "/"),
             version = version,
         )
         .unwrap();
@@ -153,10 +170,15 @@ END
 
         // Obtain MSVC environment so that the rc compiler can find the right headers.
         // https://github.com/nabijaczleweli/rust-embed-resource/issues/11#issuecomment-603655972
-        let target = std::env::var("TARGET").unwrap();
-        if let Some(tool) = cc::windows_registry::find_tool(target.as_str(), "cl.exe") {
-            for (key, value) in tool.env() {
-                std::env::set_var(key, value);
+        // 仅宿主为 Windows（MSVC 工具链）时需要：rc.exe 依赖 SDK 的 include 路径。
+        // Linux 宿主下 windres 自带 mingw 的 winres.h，无需注入 cl.exe 环境。
+        #[cfg(windows)]
+        {
+            let target = std::env::var("TARGET").unwrap();
+            if let Some(tool) = cc::windows_registry::find_tool(target.as_str(), "cl.exe") {
+                for (key, value) in tool.env() {
+                    std::env::set_var(key, value);
+                }
             }
         }
         embed_resource::compile(rcfile_name);

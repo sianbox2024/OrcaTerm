@@ -36,10 +36,13 @@ dhat-ad-hoc = ["dhat"]  # if you are doing ad hoc profiling
 
 [build-dependencies]
 anyhow.workspace = true
+# 交叉编译（Linux 宿主 → x86_64-pc-windows-gnu）时，[target.'cfg(...)'] 表格按
+# 宿主求值，宿主不是 Windows 就拿不到这个 crate，build.rs 无法为 windows 目标
+# 嵌入资源（manifest/图标/版本信息）。故必须无条件声明。
+embed-resource.workspace = true
 
 [target.'cfg(windows)'.build-dependencies]
 cc.workspace = true
-embed-resource.workspace = true
 
 [dependencies]
 anyhow.workspace = true

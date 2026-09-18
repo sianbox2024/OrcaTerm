@@ -23,6 +23,9 @@ fontdb = "0.24"
 winapi = { version = "0.3", features = ["wingdi", "winuser", "commdlg"] }
 raw-window-handle = "0.6"
 
+[build-dependencies]
+# 交叉编译时宿主非 Windows，target 表格里取不到该 crate，需无条件声明。
+embed-resource = "1.7"
+
 [target.'cfg(windows)'.build-dependencies]
 cc = "1.3"
-embed-resource = "1.7"

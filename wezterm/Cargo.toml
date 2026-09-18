@@ -62,6 +62,10 @@ features = [
 ]
 workspace = true
 
+[build-dependencies]
+# 同 wezterm-gui：交叉编译时宿主非 Windows，target 表格里取不到该 crate，
+# 需无条件声明，否则资源嵌入被静默跳过。
+embed-resource.workspace = true
+
 [target.'cfg(windows)'.build-dependencies]
 cc.workspace = true
-embed-resource.workspace = true

@@ -1,8 +1,9 @@
 fn main() {
     // Windows 下把应用图标嵌入 exe 资源（资源 ID 0x101 与主程序
     // wezterm-gui/build.rs 保持一致），explorer/任务栏才能显示品牌图标。
-    #[cfg(windows)]
-    {
+    // 必须按目标平台判断：交叉编译时宿主不是 Windows，#[cfg(windows)] 恒假会
+    // 静默跳过，导致 config-ui 的 exe 缺图标与版本信息（同 wezterm-gui/build.rs）。
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         use std::io::Write;
         use std::path::Path;
 
@@ -55,18 +56,22 @@ BEGIN
     END
 END
 "#,
-            ico_path.display().to_string().replace("\\", "\\\\")
+            ico_path.display().to_string().replace('\\', "/")
         )
         .unwrap();
         drop(rcfile);
 
         // Obtain MSVC environment so that the rc compiler can find the right headers.
-        let target = std::env::var("TARGET").unwrap();
-        if let Some(tool) = cc::windows_registry::find_tool(target.as_str(), "cl.exe") {
-            for (key, value) in tool.env() {
-                // edition 2024 要求 set_var 显式 unsafe（此处为构建脚本早期、
-                // 单线程阶段，符合其安全约定）
-                unsafe { std::env::set_var(key, value) };
+        // 仅宿主为 Windows 时需要；Linux 宿主下 windres 自带 mingw 头文件。
+        #[cfg(windows)]
+        {
+            let target = std::env::var("TARGET").unwrap();
+            if let Some(tool) = cc::windows_registry::find_tool(target.as_str(), "cl.exe") {
+                for (key, value) in tool.env() {
+                    // edition 2024 要求 set_var 显式 unsafe（此处为构建脚本早期、
+                    // 单线程阶段，符合其安全约定）
+                    unsafe { std::env::set_var(key, value) };
+                }
             }
         }
         embed_resource::compile(rcfile_name);
