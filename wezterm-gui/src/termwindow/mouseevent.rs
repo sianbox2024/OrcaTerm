@@ -26,7 +26,7 @@ use wezterm_term::input::{MouseButton, MouseEventKind as TMEK};
 use wezterm_term::{ClickPosition, LastMouseClick, StableRowIndex};
 
 impl super::TermWindow {
-    fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
+    pub(crate) fn resolve_ui_item(&self, event: &MouseEvent) -> Option<UIItem> {
         let x = event.coords.x;
         let y = event.coords.y;
         self.ui_items
@@ -127,6 +127,7 @@ impl super::TermWindow {
             WMEK::Release(ref press) => {
                 self.current_mouse_capture = None;
                 self.current_mouse_buttons.retain(|p| p != press);
+                self.tab_drag = None;
                 if press == &MousePress::Left && self.window_drag_position.take().is_some() {
                     // Completed a window drag
                     return;
@@ -178,6 +179,13 @@ impl super::TermWindow {
                     );
                     // and now tell the window to go there
                     context.set_window_position(top_left);
+                    return;
+                }
+
+                if let Some(drag) = self.tab_drag.clone() {
+                    // Reorder the dragged tab against the slot geometry
+                    // captured when the drag started.
+                    self.drag_tab_to(&drag, event.coords.x);
                     return;
                 }
 
@@ -496,6 +504,12 @@ impl super::TermWindow {
             WMEK::Press(MousePress::Left) => match item {
                 TabBarItem::Tab { tab_idx, .. } => {
                     self.activate_tab(tab_idx as isize).ok();
+                    // Arm a reorder for as long as the button stays held.
+                    // The snapshot is taken from the last painted tab bar,
+                    // which is the layout the user is actually looking at.
+                    // Dragging is refused if the press actually landed on an
+                    // element stacked above the tab, such as its close button.
+                    self.tab_drag = self.begin_tab_drag(tab_idx, &event);
                 }
                 TabBarItem::NewTabButton { .. } => {
                     self.do_new_tab_button_click(MousePress::Left);

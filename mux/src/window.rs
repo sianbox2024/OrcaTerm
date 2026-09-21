@@ -6,6 +6,19 @@ use std::sync::Arc;
 static WIN_ID: ::std::sync::atomic::AtomicUsize = ::std::sync::atomic::AtomicUsize::new(0);
 pub type WindowId = usize;
 
+/// Recomputes an index that was taken before the tab at `from` was moved to
+/// `to`, so that it keeps referring to the same element. The active tab is
+/// stored as a position, so it has to be adjusted when tabs are reordered;
+/// last_active is stored as a TabId and already follows the tab on its own.
+fn remap_index_after_move(index: usize, from: usize, to: usize) -> usize {
+    match index {
+        index if index == from => to,
+        index if from < index && index <= to => index - 1,
+        index if to <= index && index < from => index + 1,
+        index => index,
+    }
+}
+
 pub struct Window {
     id: WindowId,
     tabs: Vec<Arc<Tab>>,
@@ -85,6 +98,21 @@ impl Window {
     pub fn push(&mut self, tab: &Arc<Tab>) {
         self.check_that_tab_isnt_already_in_window(tab);
         self.tabs.push(Arc::clone(tab));
+        self.invalidate();
+    }
+
+    /// Move the tab at `from` so that it ends up at index `to`, shifting the
+    /// tabs between the two positions along by one.
+    pub fn move_tab(&mut self, from: usize, to: usize) {
+        if from >= self.tabs.len() || to >= self.tabs.len() || from == to {
+            return;
+        }
+
+        let tab = self.tabs.remove(from);
+        self.tabs.insert(to, tab);
+
+        self.active = remap_index_after_move(self.active, from, to);
+
         self.invalidate();
     }
 
@@ -264,5 +292,46 @@ impl Window {
         if invalidated {
             self.invalidate();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::remap_index_after_move;
+
+    // Moving from 3 to 1: [0,1,2,3,4] -> [0,3,1,2,4]
+    #[test]
+    fn remap_when_moving_left() {
+        // The moved tab itself lands on its target.
+        assert_eq!(remap_index_after_move(3, 3, 1), 1);
+        // Tabs it jumped over slide right by one.
+        assert_eq!(remap_index_after_move(1, 3, 1), 2);
+        assert_eq!(remap_index_after_move(2, 3, 1), 3);
+        // Tabs outside the affected range stay put.
+        assert_eq!(remap_index_after_move(0, 3, 1), 0);
+        assert_eq!(remap_index_after_move(4, 3, 1), 4);
+    }
+
+    // Moving from 1 to 3: [0,1,2,3,4] -> [0,2,3,1,4]
+    #[test]
+    fn remap_when_moving_right() {
+        assert_eq!(remap_index_after_move(1, 1, 3), 3);
+        // Tabs it jumped over slide left by one.
+        assert_eq!(remap_index_after_move(2, 1, 3), 1);
+        assert_eq!(remap_index_after_move(3, 1, 3), 2);
+        assert_eq!(remap_index_after_move(0, 1, 3), 0);
+        assert_eq!(remap_index_after_move(4, 1, 3), 4);
+    }
+
+    #[test]
+    fn remap_when_adjacent() {
+        // Neighbours swap and nothing else moves.
+        assert_eq!(remap_index_after_move(0, 0, 1), 1);
+        assert_eq!(remap_index_after_move(1, 0, 1), 0);
+        assert_eq!(remap_index_after_move(2, 0, 1), 2);
+
+        assert_eq!(remap_index_after_move(0, 1, 0), 1);
+        assert_eq!(remap_index_after_move(1, 1, 0), 0);
+        assert_eq!(remap_index_after_move(2, 1, 0), 2);
     }
 }

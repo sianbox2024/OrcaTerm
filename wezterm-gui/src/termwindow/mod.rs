@@ -262,6 +262,104 @@ impl UIItem {
     }
 }
 
+/// State for a tab being dragged along the tab bar to a new position.
+///
+/// The slot geometry is captured when the drag starts and then held fixed for
+/// its duration. Recomputing drop targets from the live layout instead would
+/// feed the reorder back into the hit-test: swapping a narrow tab with a wider
+/// neighbour can leave the cursor over the neighbour again, flipping the two
+/// tabs back and forth on every mouse move. A frozen snapshot makes the
+/// cursor-position-to-index mapping monotonic, so the order can only ever
+/// advance in one direction as the cursor moves.
+#[derive(Clone, Debug)]
+pub struct TabDrag {
+    /// Identifies the dragged tab, which keeps its identity while its index
+    /// changes.
+    pub tab_id: TabId,
+    /// Each tab's index at drag start paired with the horizontal centre of its
+    /// slot, ordered left to right. Ordering by position rather than by the
+    /// order the items happen to appear in `ui_items` keeps `target_for`
+    /// correct regardless of how the tab bar is laid out.
+    pub slots: Vec<(usize, isize)>,
+    /// Index the dragged tab had at drag start, used to skip its own slot so
+    /// that it can't displace itself.
+    pub origin: usize,
+}
+
+impl TabDrag {
+    /// Returns the index the dragged tab should occupy for a cursor at `x`:
+    /// the number of other tabs whose centre lies to its left. This is
+    /// monotonic in `x`, so the tab can only advance one slot per boundary
+    /// crossed rather than flip-flopping.
+    pub fn target_for(&self, x: isize) -> usize {
+        self.slots
+            .iter()
+            .filter(|(idx, center)| *idx != self.origin && *center < x)
+            .count()
+    }
+}
+
+#[cfg(test)]
+mod tab_drag_tests {
+    use super::TabDrag;
+
+    /// Three equal-width slots centred at 20, 60 and 100.
+    fn drag(origin: usize) -> TabDrag {
+        TabDrag {
+            tab_id: 0,
+            slots: vec![(0, 20), (1, 60), (2, 100)],
+            origin,
+        }
+    }
+
+    #[test]
+    fn targets_follow_cursor_position() {
+        let d = drag(0);
+        // Left of every slot: stays at the front.
+        assert_eq!(d.target_for(0), 0);
+        // Past the second slot but not the third.
+        assert_eq!(d.target_for(70), 1);
+        // Past every slot: lands at the end.
+        assert_eq!(d.target_for(1000), 2);
+    }
+
+    #[test]
+    fn dragged_slot_is_skipped() {
+        // Dragging the middle tab: only the other two tabs count, so the
+        // result is always one of {0, 1, 2} without the tab displacing itself.
+        let d = drag(1);
+        assert_eq!(d.target_for(0), 0);
+        assert_eq!(d.target_for(70), 1);
+        assert_eq!(d.target_for(1000), 2);
+    }
+
+    /// The mapping must not decrease as the cursor moves right, otherwise a
+    /// reorder could undo itself and oscillate. Slot widths are deliberately
+    /// uneven to exercise the case that motivated the fixed snapshot: with
+    /// live geometry a wide neighbour can re-swallow the cursor.
+    #[test]
+    fn target_is_monotonic_in_cursor_position() {
+        let d = TabDrag {
+            tab_id: 0,
+            slots: vec![(0, 40), (1, 300), (2, 340)],
+            origin: 0,
+        };
+
+        let mut previous = d.target_for(-1000);
+        for x in -1000..1000 {
+            let target = d.target_for(x);
+            assert!(
+                target >= previous,
+                "target went backwards at x={}: {} -> {}",
+                x,
+                previous,
+                target
+            );
+            previous = target;
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct SemanticZoneCache {
     seqno: SequenceNo,
@@ -540,6 +638,9 @@ pub struct TermWindow {
 
     pub(crate) ui_items: Vec<UIItem>,
     dragging: Option<(UIItem, MouseEvent)>,
+    /// Set while the left button is held on a tab, so that mouse motion
+    /// reorders the window's tabs rather than being ignored.
+    tab_drag: Option<TabDrag>,
 
     modal: RefCell<Option<Rc<dyn Modal>>>,
 
@@ -884,6 +985,7 @@ impl TermWindow {
             semantic_zones: HashMap::new(),
             ui_items: vec![],
             dragging: None,
+            tab_drag: None,
             last_ui_item: None,
             copy_button_feedback: None,
             is_click_to_focus_window: false,
@@ -2293,6 +2395,75 @@ impl TermWindow {
         }
 
         Ok(())
+    }
+
+    /// Reposition the dragged tab into the slot under the cursor, shifting the
+    /// tabs in between along by one. `target` is the index of the tab the
+    /// cursor is currently over; the dragged tab takes its place.
+    /// Captures the tab bar's slot geometry so that a drag can reorder tabs
+    /// against a fixed frame of reference. Returns None unless the press
+    /// landed on `tab_idx`'s own slot, so a drag can only start from a tab
+    /// that isn't covered by something drawn on top of it.
+    pub(crate) fn begin_tab_drag(&self, tab_idx: usize, event: &MouseEvent) -> Option<TabDrag> {
+        // The close button sits on top of the tab it belongs to and resolves
+        // to a CloseTab item. Reordering from there would fight with the
+        // click-to-close behaviour, so require that the topmost item under the
+        // press is the tab slot itself.
+        match self.resolve_ui_item(event) {
+            Some(UIItem {
+                item_type: UIItemType::TabBar(TabBarItem::Tab { tab_idx: idx, .. }),
+                ..
+            }) if idx == tab_idx => {}
+            _ => return None,
+        }
+
+        let mut slots = vec![];
+        let mut origin = None;
+
+        for item in &self.ui_items {
+            if let UIItemType::TabBar(TabBarItem::Tab { tab_idx: idx, .. }) = item.item_type {
+                if idx == tab_idx {
+                    origin = Some(idx);
+                }
+                slots.push((idx, item.x as isize + (item.width / 2) as isize));
+            }
+        }
+
+        let origin = origin?;
+        slots.sort_by_key(|(_, center)| *center);
+
+        let tab_id = Mux::get()
+            .get_window(self.mux_window_id)?
+            .get_by_idx(tab_idx)
+            .map(|tab| tab.tab_id())?;
+
+        Some(TabDrag {
+            tab_id,
+            slots,
+            origin,
+        })
+    }
+
+    /// Moves the dragged tab to the slot its cursor currently indicates.
+    fn drag_tab_to(&mut self, drag: &TabDrag, x: isize) {
+        let target = drag.target_for(x);
+
+        let mux = Mux::get();
+        let mut window = match mux.get_window_mut(self.mux_window_id) {
+            Some(window) => window,
+            None => return,
+        };
+
+        let from = match window.idx_by_id(drag.tab_id) {
+            Some(idx) => idx,
+            None => return,
+        };
+
+        if from == target {
+            return;
+        }
+
+        window.move_tab(from, target);
     }
 
     fn activate_tab(&mut self, tab_idx: isize) -> anyhow::Result<()> {
