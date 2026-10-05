@@ -153,8 +153,9 @@ pub struct SshDomain {
     pub inject_prompt: Option<SshPromptInjection>,
 
     /// OrcaTerm:starship 模式下要上传到远端的本地 starship 二进制路径。
-    /// 需为与远端架构一致的 Linux ELF。未设置时按"本地 PATH -> 本地缓存 ->
-    /// GitHub Releases 下载"的顺序自动解析。
+    /// 需为与远端架构一致的 Linux ELF。未设置时按"程序同目录
+    /// dist/starship/ -> 本地 PATH -> 本地缓存 -> GitHub Releases 下载"
+    /// 的顺序自动解析。
     #[dynamic(default)]
     pub starship_binary_path: Option<String>,
 }

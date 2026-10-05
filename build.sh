@@ -54,6 +54,46 @@ sync_shaders_to_out_dirs() {
     fi
 }
 
+# 辅助函数：下载 starship 静态 musl 二进制到 dist/starship/，
+# 供 SSH 提示符注入在离线环境使用（连接时优先从程序同目录取）。
+# 版本号以 wezterm-ssh/src/orca_prompt.rs 的 STARSHIP_VERSION 为单一事实源。
+fetch_starship() {
+    local ver
+    ver=$(grep -o 'STARSHIP_VERSION: &str = "[0-9.]*"' "$ROOT_DIR/wezterm-ssh/src/orca_prompt.rs" 2>/dev/null | head -1 | cut -d'"' -f2)
+    if [ -z "$ver" ]; then
+        echo "==> 警告：无法从 orca_prompt.rs 解析 STARSHIP_VERSION，跳过 dist/starship 下载"
+        return 0
+    fi
+    # 版本变化时清掉旧版本产物，避免目录里残留过期二进制
+    if [ -f "dist/starship/.version" ] && [ "$(cat dist/starship/.version)" != "$ver" ]; then
+        rm -rf dist/starship
+    fi
+    mkdir -p dist/starship
+    printf %s "$ver" > dist/starship/.version
+
+    local base="https://github.com/starship/starship/releases/download/v$ver"
+    local target
+    for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl; do
+        local out="dist/starship/starship-$target"
+        if [ -s "$out" ]; then
+            continue
+        fi
+        echo "==> 下载 starship v$ver ($target)..."
+        local tmp
+        tmp=$(mktemp -d)
+        if curl -fsSL "$base/starship-$target.tar.gz" -o "$tmp/s.tar.gz" \
+            && curl -fsSL "$base/starship-$target.tar.gz.sha256" -o "$tmp/s.sha256" \
+            && echo "$(awk '{print $1}' "$tmp/s.sha256")  $tmp/s.tar.gz" | sha256sum -c - >/dev/null \
+            && tar -xzf "$tmp/s.tar.gz" -C "$tmp" starship \
+            && mv "$tmp/starship" "$out"; then
+            echo "    已就位: $out"
+        else
+            echo "==> 警告：starship $target 获取失败，运行时将回退为在线下载/builtin 提示符"
+        fi
+        rm -rf "$tmp"
+    done
+}
+
 # 3. 准备 gpui 交叉编译补丁（着色器回退）
 GPUI_BUILD_RS="$ROOT_DIR/Ref-src/zed/crates/gpui_windows/build.rs"
 if [ -f "$GPUI_BUILD_RS" ]; then
@@ -111,6 +151,7 @@ echo "==> 正在编译 config-ui..."
 # 6. 打包提取文件到 dist/ 目录
 echo "==> 正在复制并整理到 dist/ 目录..."
 mkdir -p dist
+fetch_starship
 
 cp -f "$SRC/orca-term-gui.exe" dist/
 cp -f "$SRC/orca-term.exe" dist/

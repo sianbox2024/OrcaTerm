@@ -385,8 +385,9 @@ pub struct Config {
     pub ssh_inject_prompt: SshPromptInjection,
 
     /// OrcaTerm:starship 注入模式下使用的本地 starship 二进制路径
-    /// （Linux ELF，架构需与远端一致）。未设置时按"本地 PATH -> 本地缓存
-    /// -> GitHub Releases 下载 v{starship 版本}"的顺序自动解析。
+    /// （Linux ELF，架构需与远端一致）。未设置时按"程序同目录
+    /// dist/starship/ -> 本地 PATH -> 本地缓存 -> GitHub Releases 下载"
+    /// 的顺序自动解析。
     #[dynamic(default)]
     pub ssh_starship_binary_path: Option<String>,
 

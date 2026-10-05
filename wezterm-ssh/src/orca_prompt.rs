@@ -7,7 +7,8 @@
 //! 1. exec 一段探测命令,取得远端 $SHELL/$HOME/架构,并创建注入目录;
 //! 2. 经 SFTP(不可用时退化为 exec+base64)上传提示符脚本;starship
 //!    模式还会上传静态编译的 starship 二进制(来源:显式配置的本地
-//!    路径 -> 本地 PATH -> 本地缓存 -> GitHub Releases 下载);
+//!    路径 -> 程序同目录 dist/starship/ -> 本地 PATH -> 本地缓存 ->
+//!    GitHub Releases 下载);
 //! 3. 以 `bash --rcfile` / `zsh ZDOTDIR` 方式启动交互式 shell,加载
 //!    注入的 rc(其中会先 source 用户原有的 rc);
 //! 4. 任何一步失败都回退为普通的 request_shell,不影响连接本身;
@@ -128,7 +129,8 @@ fn which_starship() -> Option<PathBuf> {
 }
 
 /// 解析并读取可上传的 starship 二进制:
-/// 显式配置路径 -> 本地 PATH -> 本地缓存 -> GitHub Releases 下载。
+/// 显式配置路径 -> 程序同目录 dist/starship/ -> 本地 PATH -> 本地缓存 ->
+/// GitHub Releases 下载。
 /// 所有候选都要求是与远端架构匹配的 Linux ELF(本机的 macOS/Windows
 /// 二进制会被拒绝,避免把跑不起来的东西传到远端)。
 fn resolve_local_starship(explicit: Option<&str>, arch: &str) -> anyhow::Result<Vec<u8>> {
@@ -143,6 +145,14 @@ fn resolve_local_starship(explicit: Option<&str>, arch: &str) -> anyhow::Result<
             candidates.push(path.join("starship"));
         } else {
             candidates.push(path);
+        }
+    }
+    // 程序同目录的 starship/ 由 build.sh 打包时附带,离线环境开箱即用
+    if let Some(target) = starship_target(arch) {
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                candidates.push(dir.join("starship").join(format!("starship-{target}")));
+            }
         }
     }
     if let Some(p) = which_starship() {

@@ -17,9 +17,10 @@
       `~/.cache/orcaterm/bin/` 并以 rcfile 方式启用，远端得到 100% 真正
       的 starship（远端 `~/.config/starship.toml` 照常生效）。
   - 本地 starship 二进制解析顺序：显式配置的 `ssh_starship_binary_path` /
-    `starship_binary_path` → 本机 PATH → 本地缓存 → GitHub Releases
-    下载（校验官方 sha256）；本机二进制必须是与远端架构匹配的 Linux ELF，
-    否则自动跳过（避免把 macOS/Windows 二进制传上去跑不起来）。
+    `starship_binary_path` → 程序同目录 `dist/starship/`（build.sh 打包时
+    自动下载附带，离线环境开箱即用）→ 本机 PATH → 本地缓存 → GitHub
+    Releases 下载（校验官方 sha256）；本机二进制必须是与远端架构匹配的
+    Linux ELF，否则自动跳过（避免把 macOS/Windows 二进制传上去跑不起来）。
   - 注入机制：探测远端 `$SHELL/$HOME/架构` → SFTP 上传（不可用时退化为
     exec+base64）→ 以 `bash --rcfile` / `zsh ZDOTDIR` 启动交互式 shell，
     注入的 rc 会先 source 用户原有的 rc；内置提示符还输出 OSC 133 标记，
