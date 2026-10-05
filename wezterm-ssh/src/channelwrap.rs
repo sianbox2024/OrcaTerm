@@ -93,6 +93,18 @@ impl ChannelWrap {
         }
     }
 
+    /// OrcaTerm:发送 EOF 关闭通道的 stdin，让远端从 stdin 读取数据的
+    /// 命令（如 `base64 -d > file`）正常结束。
+    pub fn send_eof(&mut self) -> anyhow::Result<()> {
+        match self {
+            #[cfg(feature = "ssh2")]
+            Self::Ssh2(chan) => Ok(chan.send_eof()?),
+
+            #[cfg(feature = "libssh-rs")]
+            Self::LibSsh(chan) => Ok(chan.send_eof()?),
+        }
+    }
+
     pub fn request_pty(&mut self, newpty: &NewPty) -> anyhow::Result<()> {
         match self {
             #[cfg(feature = "ssh2")]

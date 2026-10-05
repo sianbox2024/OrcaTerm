@@ -15,7 +15,7 @@ use crate::keyassignment::{
 };
 use crate::keys::{Key, LeaderKey, Mouse};
 use crate::lua::make_lua_context;
-use crate::ssh::{SshBackend, SshDomain};
+use crate::ssh::{SshBackend, SshDomain, SshPromptInjection};
 use crate::tls::{TlsDomainClient, TlsDomainServer};
 use crate::units::Dimension;
 use crate::unix::UnixDomain;
@@ -374,6 +374,21 @@ pub struct Config {
 
     #[dynamic(default)]
     pub ssh_backend: SshBackend,
+
+    /// OrcaTerm:SSH 连接时的提示符注入模式（全局默认值，可被每个
+    /// ssh_domains 条目的 inject_prompt 覆盖）。"Off"=不注入;
+    /// "Builtin"=把 OrcaTerm 内置的纯 shell 提示符注入到远端 shell;
+    /// "Starship"=把静态编译的 starship 二进制下发到远端后启用，远端
+    /// 无需预装 starship。注入只作用于内置 SSH 客户端发起的交互式
+    /// shell；显式指定远端命令或注入流程失败时回退为远端默认提示符。
+    #[dynamic(default)]
+    pub ssh_inject_prompt: SshPromptInjection,
+
+    /// OrcaTerm:starship 注入模式下使用的本地 starship 二进制路径
+    /// （Linux ELF，架构需与远端一致）。未设置时按"本地 PATH -> 本地缓存
+    /// -> GitHub Releases 下载 v{starship 版本}"的顺序自动解析。
+    #[dynamic(default)]
+    pub ssh_starship_binary_path: Option<String>,
 
     /// When running in server mode, defines configuration for
     /// each of the endpoints that we'll listen for connections

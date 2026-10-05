@@ -1,5 +1,42 @@
 # Changelog
 
+## 未发布
+
+### 新增
+
+- **SSH 提示符注入（远端零安装获得 starship 提示符）**
+  - 动机：提示符由远端 shell 打印，终端只负责显示；远端没装 starship 时，
+    任何终端都只能显示默认 PS1。OrcaTerm 现在会在建立 SSH 连接时自动把
+    提示符逻辑注入到远端交互式 shell，远端机器无需安装任何东西。
+  - 开关：`ssh_inject_prompt`（全局）/ `inject_prompt`（每个 ssh_domains
+    条目，覆盖全局），三档（与上游枚举配置一致，首字母大写）：
+    - `"Off"`（默认）：不注入，行为与上游 WezTerm 一致；
+    - `"Builtin"`：注入内置的纯 shell 提示符（用户@主机、短路径、git 分支
+      及脏标记、退出码变色），bash/zsh 通用，零外部依赖；
+    - `"Starship"`：把静态编译的 starship 二进制上传到远端
+      `~/.cache/orcaterm/bin/` 并以 rcfile 方式启用，远端得到 100% 真正
+      的 starship（远端 `~/.config/starship.toml` 照常生效）。
+  - 本地 starship 二进制解析顺序：显式配置的 `ssh_starship_binary_path` /
+    `starship_binary_path` → 本机 PATH → 本地缓存 → GitHub Releases
+    下载（校验官方 sha256）；本机二进制必须是与远端架构匹配的 Linux ELF，
+    否则自动跳过（避免把 macOS/Windows 二进制传上去跑不起来）。
+  - 注入机制：探测远端 `$SHELL/$HOME/架构` → SFTP 上传（不可用时退化为
+    exec+base64）→ 以 `bash --rcfile` / `zsh ZDOTDIR` 启动交互式 shell，
+    注入的 rc 会先 source 用户原有的 rc；内置提示符还输出 OSC 133 标记，
+    为后续终端侧命令块渲染预留。
+  - 安全回退链：仅内置 SSH 客户端且未显式指定远端命令时注入；远端
+    登录 shell 不是 bash/zsh、SFTP/base64 上传失败、starship 下载失败
+    （自动降级为 builtin）等任何一步失败，都回退为远端默认提示符，
+    不影响连接本身。
+
+  ```lua
+  -- 全局开启 starship 注入
+  config.ssh_inject_prompt = "Starship"
+  -- 也可按域覆盖：
+  -- config.ssh_domains = { { name = "dev", remote_address = "dev.example.com",
+  --                         inject_prompt = "Builtin" } }
+  ```
+
 ## v0.1.0 (2026-08-26)
 
 首个 orca-term 版本。基于 WezTerm 分叉，核心差异化能力为**内置 GPUI 图形化配置界面**。

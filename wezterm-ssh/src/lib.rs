@@ -7,6 +7,7 @@ mod config;
 mod dirwrap;
 mod filewrap;
 mod host;
+mod orca_prompt;
 mod pty;
 mod session;
 mod sessioninner;

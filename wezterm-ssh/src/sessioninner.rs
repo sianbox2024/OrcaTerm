@@ -1044,7 +1044,10 @@ impl SessionInner {
     }
 
     /// Initialize the sftp channel if not already created, returning a mutable reference to it
-    fn init_sftp<'a>(&mut self, sess: &'a mut SessionWrap) -> SftpChannelResult<&'a mut SftpWrap> {
+    pub(crate) fn init_sftp<'a>(
+        &mut self,
+        sess: &'a mut SessionWrap,
+    ) -> SftpChannelResult<&'a mut SftpWrap> {
         match sess {
             #[cfg(feature = "ssh2")]
             SessionWrap::Ssh2(sess) => {

@@ -223,6 +223,37 @@ pub fn ssh_domain_to_ssh_config(ssh_dom: &SshDomain) -> anyhow::Result<ConfigMap
     if ssh_dom.no_agent_auth {
         ssh_config.insert("identitiesonly".to_string(), "yes".to_string());
     }
+
+    // OrcaTerm:提示符注入配置，经 wezterm-ssh 的 ConfigMap 下发到会话层。
+    // 注入的本地资源（starship 二进制）解析放在这里，会话层只负责上传。
+    let inject_mode = ssh_dom
+        .inject_prompt
+        .unwrap_or_else(|| config::configuration().ssh_inject_prompt);
+    match inject_mode {
+        config::SshPromptInjection::Off => {}
+        mode @ (config::SshPromptInjection::Builtin
+        | config::SshPromptInjection::Starship) => {
+            ssh_config.insert(
+                "orcaterm.inject_prompt".to_string(),
+                match mode {
+                    config::SshPromptInjection::Builtin => "builtin",
+                    config::SshPromptInjection::Starship => "starship",
+                    config::SshPromptInjection::Off => unreachable!(),
+                }
+                .to_string(),
+            );
+            if mode == config::SshPromptInjection::Starship {
+                let local_path = ssh_dom
+                    .starship_binary_path
+                    .clone()
+                    .or_else(|| config::configuration().ssh_starship_binary_path.clone());
+                if let Some(path) = local_path {
+                    ssh_config.insert("orcaterm.starship_path".to_string(), path);
+                }
+            }
+        }
+    }
+
     if let Some("true") = ssh_config.get("wezterm_ssh_verbose").map(|s| s.as_str()) {
         log::info!("Using ssh config: {ssh_config:#?}");
     }

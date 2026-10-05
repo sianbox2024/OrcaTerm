@@ -17,6 +17,41 @@ impl Default for SshBackend {
     }
 }
 
+/// OrcaTerm:SSH 连接时的提示符注入模式。
+/// 远端机器无需安装 starship：终端会自动把提示符逻辑下发到远端 shell。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
+pub enum SshPromptInjection {
+    /// 不注入，远端 shell 使用自己的默认提示符（默认值，行为与上游一致）
+    Off,
+    /// 注入 OrcaTerm 内置的纯 shell 提示符（零远端安装，无外部依赖）
+    Builtin,
+    /// 注入真正的 starship：把静态编译的 starship 二进制上传到远端
+    /// ~/.cache/orcaterm/ 后以 rcfile 方式启用。本地二进制的查找顺序为
+    /// 显式配置的路径、本地 PATH、本地缓存，都没有时从 GitHub Releases 下载
+    Starship,
+}
+
+impl Default for SshPromptInjection {
+    fn default() -> Self {
+        Self::Off
+    }
+}
+
+impl std::str::FromStr for SshPromptInjection {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "Off" | "off" => Ok(Self::Off),
+            "Builtin" | "builtin" => Ok(Self::Builtin),
+            "Starship" | "starship" => Ok(Self::Starship),
+            _ => Err(format!(
+                "invalid ssh prompt injection mode: {}, expected one of off, builtin, starship",
+                s
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
 pub enum SshMultiplexing {
     WezTerm,
@@ -110,6 +145,18 @@ pub struct SshDomain {
     /// 留空=按钮提示未配置。产品决策:SFTP 功能由第三方工具承担。
     #[dynamic(default)]
     pub sftp_command: String,
+
+    /// OrcaTerm:提示符注入模式，覆盖全局 ssh_inject_prompt。
+    /// "Off"=不注入; "Builtin"=注入内置纯 shell 提示符; "Starship"=下发
+    /// 真正的 starship 二进制到远端。未设置(None)时跟随全局配置。
+    #[dynamic(default)]
+    pub inject_prompt: Option<SshPromptInjection>,
+
+    /// OrcaTerm:starship 模式下要上传到远端的本地 starship 二进制路径。
+    /// 需为与远端架构一致的 Linux ELF。未设置时按"本地 PATH -> 本地缓存 ->
+    /// GitHub Releases 下载"的顺序自动解析。
+    #[dynamic(default)]
+    pub starship_binary_path: Option<String>,
 }
 impl_lua_conversion_dynamic!(SshDomain);
 

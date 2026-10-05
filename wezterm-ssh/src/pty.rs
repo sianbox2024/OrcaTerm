@@ -260,6 +260,9 @@ impl crate::sessioninner::SessionInner {
 
         if let Some(cmd) = &newpty.command_line {
             channel.request_exec(cmd)?;
+        } else if let Some(cmd) = self.maybe_inject_prompt(sess) {
+            // OrcaTerm:提示符注入成功,用注入的 rc 启动交互式 shell
+            channel.request_exec(&cmd)?;
         } else {
             channel.request_shell()?;
         }
