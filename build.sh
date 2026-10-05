@@ -81,8 +81,8 @@ fetch_starship() {
         echo "==> 下载 starship v$ver ($target)..."
         local tmp
         tmp=$(mktemp -d)
-        if curl -fsSL "$base/starship-$target.tar.gz" -o "$tmp/s.tar.gz" \
-            && curl -fsSL "$base/starship-$target.tar.gz.sha256" -o "$tmp/s.sha256" \
+        if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$base/starship-$target.tar.gz" -o "$tmp/s.tar.gz" \
+            && curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$base/starship-$target.tar.gz.sha256" -o "$tmp/s.sha256" \
             && echo "$(awk '{print $1}' "$tmp/s.sha256")  $tmp/s.tar.gz" | sha256sum -c - >/dev/null \
             && tar -xzf "$tmp/s.tar.gz" -C "$tmp" starship \
             && mv "$tmp/starship" "$out"; then
