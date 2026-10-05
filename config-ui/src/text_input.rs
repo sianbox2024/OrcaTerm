@@ -1,4 +1,4 @@
-//! 文本输入组件——移植自 zed-1.16.1 gpui examples/input.rs，保留 IME/选区/剪贴板能力。
+//! 文本输入组件——移植自 zed 的 gpui examples/input.rs，保留 IME/选区/剪贴板能力。
 
 use std::ops::Range;
 use std::rc::Rc;

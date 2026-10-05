@@ -9,8 +9,8 @@ build = "build.rs"
 [workspace]
 
 [dependencies]
-gpui = { path = "../Ref-src/zed-1.16.1/crates/gpui" }
-gpui_platform = { path = "../Ref-src/zed-1.16.1/crates/gpui_platform" }
+gpui = { path = "../Ref-src/zed/crates/gpui" }
+gpui_platform = { path = "../Ref-src/zed/crates/gpui_platform" }
 config-ui-core = { path = "../config-ui-core" }
 serde_json = "1.0"
 unicode-segmentation = "1.12"

@@ -55,12 +55,12 @@ sync_shaders_to_out_dirs() {
 }
 
 # 3. 准备 gpui 交叉编译补丁（着色器回退）
-GPUI_BUILD_RS="$ROOT_DIR/Ref-src/zed-1.16.1/crates/gpui_windows/build.rs"
+GPUI_BUILD_RS="$ROOT_DIR/Ref-src/zed/crates/gpui_windows/build.rs"
 if [ -f "$GPUI_BUILD_RS" ]; then
     if ! grep -q "shaders_bytes.rs fallback" "$GPUI_BUILD_RS"; then
         python3 - << 'EOF'
 import os
-build_rs = "Ref-src/zed-1.16.1/crates/gpui_windows/build.rs"
+build_rs = "Ref-src/zed/crates/gpui_windows/build.rs"
 if os.path.exists(build_rs):
     with open(build_rs, "r", encoding="utf-8") as f:
         content = f.read()

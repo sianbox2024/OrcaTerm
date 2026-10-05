@@ -2344,7 +2344,8 @@ impl Render for ConfigUi {
                 let before = window.focused(cx);
                 window.focus_next(cx);
                 if window.focused(cx) == before && before.is_some() {
-                    window.blur();
+                    // gpui 0.62 起 blur 需要传入 App 上下文
+                    window.blur(cx);
                     window.focus_next(cx);
                 }
             }))
@@ -2352,7 +2353,7 @@ impl Render for ConfigUi {
                 let before = window.focused(cx);
                 window.focus_prev(cx);
                 if window.focused(cx) == before && before.is_some() {
-                    window.blur();
+                    window.blur(cx);
                     window.focus_prev(cx);
                 }
             }))
