@@ -76,6 +76,19 @@ impl SessionWrap {
         }
     }
 
+    /// OrcaTerm:会话是否已异常断开(远端掉电/断网/sshd 被杀)。
+    /// libssh 在连接异常终止后会把 session->alive 清零，`is_connected`
+    /// 随之变 false;ssh2 没有等价的可靠查询，维持 false 走原有路径。
+    pub fn is_broken(&self) -> bool {
+        match self {
+            #[cfg(feature = "ssh2")]
+            Self::Ssh2(_sess) => false,
+
+            #[cfg(feature = "libssh-rs")]
+            Self::LibSsh(sess) => !sess.sess.is_connected(),
+        }
+    }
+
     pub fn open_session(&self) -> anyhow::Result<ChannelWrap> {
         match self {
             #[cfg(feature = "ssh2")]

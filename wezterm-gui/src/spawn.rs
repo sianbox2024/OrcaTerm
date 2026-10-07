@@ -55,14 +55,21 @@ pub async fn spawn_command_internal(
     // 提权实例自己创建的 ConPTY+shell 天然继承管理员令牌，
     // 其所有 tab 都会被 is_elevated 检测命中并显示「(管理员)」标题前缀。
     if spawn.elevate {
-        if cfg!(windows) {
+        // 提权依赖 ShellExecuteW runas（Windows 专有），必须用编译期 cfg
+        // 门控：cfg!(windows) 是运行时布尔，Linux 构建仍会对块内引用的
+        // #[cfg(windows)] 函数做类型检查而导致编译失败。
+        #[cfg(windows)]
+        {
             if spawn.domain != config::keyassignment::SpawnTabDomain::CurrentPaneDomain {
                 anyhow::bail!("elevate 不支持与非本机域组合使用");
             }
             spawn_elevated_instance(&spawn)?;
             return Ok(());
         }
-        log::warn!("elevate 仅在 Windows 上生效，已忽略");
+        #[cfg(not(windows))]
+        {
+            log::warn!("elevate 仅在 Windows 上生效，已忽略");
+        }
     }
 
     let mux = Mux::get();

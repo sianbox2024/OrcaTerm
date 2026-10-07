@@ -55,7 +55,9 @@ sync_shaders_to_out_dirs() {
 }
 
 # 辅助函数：下载 starship 静态 musl 二进制到 dist/starship/，
-# 供 SSH 提示符注入在离线环境使用（连接时优先从程序同目录取）。
+# 供 SSH 提示符注入在离线环境使用（连接时优先从程序同目录取）；
+# 同时下载 Windows 版 starship.exe 到 dist/ 根目录，供本机 PowerShell
+# 提示符使用（如用户配置里引用的「程序目录\starship.exe」）。
 # 版本号以 wezterm-ssh/src/orca_prompt.rs 的 STARSHIP_VERSION 为单一事实源。
 fetch_starship() {
     local ver
@@ -70,6 +72,17 @@ fetch_starship() {
     fi
     mkdir -p dist/starship
     printf %s "$ver" > dist/starship/.version
+
+    # starship 相关产物统一放 dist/starship/（本机 PowerShell 与远端注入共用）：
+    # - starship.toml：gruvbox powerline 预设（Issue/starship.toml），本机经
+    #   STARSHIP_CONFIG 引用，SSH 注入时也上传到远端；
+    # - starship.exe：Windows 版，本机 PowerShell 启动菜单经
+    #   & '…\starship\starship.exe' init powershell 引用（Issue/1.png）。
+    if [ -f "$ROOT_DIR/assets/starship.toml" ]; then
+        cp -f "$ROOT_DIR/assets/starship.toml" "dist/starship/starship.toml"
+    else
+        echo "==> 警告：缺少 assets/starship.toml，starship 提示符将使用出厂默认样式"
+    fi
 
     local base="https://github.com/starship/starship/releases/download/v$ver"
     local target
@@ -92,6 +105,24 @@ fetch_starship() {
         fi
         rm -rf "$tmp"
     done
+
+    # Windows 版给本机 PowerShell 用：便携包应开箱即用，缺文件时 PowerShell
+    # 每次启动都会报「无法识别 starship.exe」
+    if [ ! -s "dist/starship/starship.exe" ]; then
+        echo "==> 下载 starship v$ver (x86_64-pc-windows-msvc)..."
+        local tmp
+        tmp=$(mktemp -d)
+        if curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$base/starship-x86_64-pc-windows-msvc.zip" -o "$tmp/s.zip" \
+            && curl -fsSL --retry 3 --retry-delay 2 --retry-all-errors "$base/starship-x86_64-pc-windows-msvc.zip.sha256" -o "$tmp/s.sha256" \
+            && echo "$(awk '{print $1}' "$tmp/s.sha256")  $tmp/s.zip" | sha256sum -c - >/dev/null \
+            && unzip -o "$tmp/s.zip" starship.exe -d "$tmp" >/dev/null \
+            && mv "$tmp/starship.exe" "dist/starship/starship.exe"; then
+            echo "    已就位: dist/starship/starship.exe"
+        else
+            echo "==> 警告：starship.exe（Windows）获取失败，本机 PowerShell 的 starship 提示符将不可用"
+        fi
+        rm -rf "$tmp"
+    fi
 }
 
 # 3. 准备 gpui 交叉编译补丁（着色器回退）
@@ -156,6 +187,13 @@ fetch_starship
 cp -f "$SRC/orca-term-gui.exe" dist/
 cp -f "$SRC/orca-term.exe" dist/
 cp -f "$CONFIG_UI_SRC/orca-term-config-ui.exe" dist/
+
+# 随包默认 orca-config.lua（assets/orca-config.lua：本机 PowerShell 经
+# starship\ 子目录启用提示符的完整配置）。部署时覆盖到程序目录即为该
+# 配置；用户后续手改的配置在重新部署时需自行备份。
+if [ -f "$ROOT_DIR/assets/orca-config.lua" ]; then
+    cp -f "$ROOT_DIR/assets/orca-config.lua" "dist/orca-config.lua"
+fi
 
 # 复制 ConPTY 运行时依赖
 cp -f "assets/windows/conhost/conpty.dll" dist/

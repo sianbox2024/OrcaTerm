@@ -19,6 +19,10 @@ fn harfbuzz() {
     cfg.flag_if_supported("-std=c++11");
     cfg.flag_if_supported("-fno-stack-check");
     cfg.flag_if_supported("-Wno-format-overflow");
+    // MinGW 的 gas 汇编器在 debug 构建（海量模板实例化 + 调试节）下会超出
+    // COFF 节数上限（"too many sections"/"file too big"），改用 big-obj
+    // 目标格式；不支持该 flag 的工具链（ELF gas、MSVC）会被自动跳过。
+    cfg.flag_if_supported("-Wa,-mbig-obj");
 
     let build_dir = out_dir.join("harfbuzz-build");
     fs::create_dir_all(&build_dir).unwrap();

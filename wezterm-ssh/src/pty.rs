@@ -258,13 +258,15 @@ impl crate::sessioninner::SessionInner {
             }
         }
 
-        if let Some(cmd) = &newpty.command_line {
-            channel.request_exec(cmd)?;
-        } else if let Some(cmd) = self.maybe_inject_prompt(sess) {
-            // OrcaTerm:提示符注入成功,用注入的 rc 启动交互式 shell
-            channel.request_exec(&cmd)?;
-        } else {
-            channel.request_shell()?;
+        // OrcaTerm:提示符注入。未显式指定远端命令时用注入的 rc 启动交互式
+        // shell；显式命令（配置界面「连接后命令」生成的 `…; exec $SHELL`
+        // 惯用法）以 `SHELL=<wrapper>` 前缀执行，使连接后命令与注入共存；
+        // 注入未开启或失败时按原样启动，不影响连接本身。
+        let injected = self.maybe_inject_prompt(sess, newpty.command_line.as_deref());
+        match (&newpty.command_line, injected) {
+            (_, Some(cmd)) => channel.request_exec(&cmd)?,
+            (Some(cmd), None) => channel.request_exec(cmd)?,
+            (None, None) => channel.request_shell()?,
         }
 
         let channel_id = self.next_channel_id;

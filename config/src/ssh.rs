@@ -21,7 +21,7 @@ impl Default for SshBackend {
 /// 远端机器无需安装 starship：终端会自动把提示符逻辑下发到远端 shell。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, FromDynamic, ToDynamic)]
 pub enum SshPromptInjection {
-    /// 不注入，远端 shell 使用自己的默认提示符（默认值，行为与上游一致）
+    /// 不注入，远端 shell 使用自己的默认提示符（行为与上游一致）
     Off,
     /// 注入 OrcaTerm 内置的纯 shell 提示符（零远端安装，无外部依赖）
     Builtin,
@@ -31,9 +31,13 @@ pub enum SshPromptInjection {
     Starship,
 }
 
+/// 产品默认：开箱即用的 starship 注入。注入链路自带多级安全回退
+/// （远端 shell 不支持/上传失败/下载失败都回退远端默认提示符），
+/// 配置界面「连接后命令」生成的 `…; exec $SHELL` 惯用法经 $SHELL
+/// 包装与注入共存。需要关闭时显式设 "Off"。
 impl Default for SshPromptInjection {
     fn default() -> Self {
-        Self::Off
+        Self::Starship
     }
 }
 

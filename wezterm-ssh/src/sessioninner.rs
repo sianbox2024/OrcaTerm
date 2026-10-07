@@ -449,12 +449,16 @@ impl SessionInner {
 
         loop {
             self.do_keepalive(sess)?;
-            self.tick_io()?;
+            // OrcaTerm:每轮检测会话是否已异常断开(远端掉电/断网)。断开后
+            // exit-status 包永远不会再到达，tick_io 会立即给所有挂起的
+            // channel 收尾，避免终端 pane 永远挂在旧画面上。
+            let session_broken = sess.is_broken();
+            self.tick_io(session_broken)?;
             self.drain_request_pipe();
             self.dispatch_pending_requests(sess)?;
             self.connect_pending_agent_forward_channels(sess);
 
-            if self.channels.is_empty() && self.session_was_dropped {
+            if self.channels.is_empty() && (self.session_was_dropped || session_broken) {
                 log::trace!(
                     "Stopping session loop as there are no more channels and Session was dropped"
                 );
@@ -550,16 +554,40 @@ impl SessionInner {
     }
 
     /// Goal: if we have data to write to channels, try to send it.
-    /// If we have room in our channel fd write buffers, try to fill it
-    fn tick_io(&mut self) -> anyhow::Result<()> {
+    /// If we have room in our channel fd write buffers, try to fill it.
+    /// `session_broken` 表示底层 SSH 连接已异常终止:此时 exit-status 永远
+    /// 不会到达，需要就地给 channel 收尾(Issue/2.png:远端 poweroff 后
+    /// pane 永远挂在旧提示符上)。
+    fn tick_io(&mut self, session_broken: bool) -> anyhow::Result<()> {
         let mut dead = vec![];
         for (id, chan) in self.channels.iter_mut() {
             if chan.exit.is_some() {
-                if let Some(status) = chan.channel.exit_status() {
-                    log::trace!("channel {id} has exit status {status:?}");
-                    chan.exited = true;
-                    let exit = chan.exit.take().unwrap();
-                    smol::block_on(exit.send(status)).ok();
+                match chan.channel.exit_status() {
+                    Some(status) => {
+                        log::trace!("channel {id} has exit status {status:?}");
+                        chan.exited = true;
+                        let exit = chan.exit.take().unwrap();
+                        smol::block_on(exit.send(status)).ok();
+                    }
+                    // 会话已断:不会有 exit-status 包了，用 ssh 客户端惯例的
+                    // 255 收尾，让终端侧按子进程退出关闭 pane
+                    None if session_broken => {
+                        log::trace!(
+                            "channel {id} outlived a broken session; resolving with 255"
+                        );
+                        chan.exited = true;
+                        let exit = chan.exit.take().unwrap();
+                        smol::block_on(exit.send(ExitStatus::with_exit_code(255))).ok();
+                    }
+                    None => {}
+                }
+            }
+
+            if session_broken {
+                // 断开后 socketpair 不会再有数据流动，直接丢弃所有描述符，
+                // 让下方的回收逻辑把 channel 移除、会话线程得以退出
+                for state in chan.descriptors.iter_mut() {
+                    state.fd.take();
                 }
             }
 

@@ -376,11 +376,12 @@ pub struct Config {
     pub ssh_backend: SshBackend,
 
     /// OrcaTerm:SSH 连接时的提示符注入模式（全局默认值，可被每个
-    /// ssh_domains 条目的 inject_prompt 覆盖）。"Off"=不注入;
-    /// "Builtin"=把 OrcaTerm 内置的纯 shell 提示符注入到远端 shell;
-    /// "Starship"=把静态编译的 starship 二进制下发到远端后启用，远端
-    /// 无需预装 starship。注入只作用于内置 SSH 客户端发起的交互式
-    /// shell；显式指定远端命令或注入流程失败时回退为远端默认提示符。
+    /// ssh_domains 条目的 inject_prompt 覆盖）。默认 "Starship"=开箱即用，
+    /// 把静态编译的 starship 二进制与随包默认配置下发到远端后启用；
+    /// "Builtin"=注入内置纯 shell 提示符; "Off"=不注入，行为与上游
+    /// WezTerm 一致。注入只作用于内置 SSH 客户端发起的交互式 shell
+    /// （含配置界面「连接后命令」的 `…; exec $SHELL` 惯用法，经 $SHELL
+    /// 包装共存）；注入流程失败时回退为远端默认提示符。
     #[dynamic(default)]
     pub ssh_inject_prompt: SshPromptInjection,
 
