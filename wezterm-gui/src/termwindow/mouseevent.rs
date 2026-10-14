@@ -7,7 +7,7 @@ use ::window::{
     WindowDecorations, WindowOps, WindowState,
 };
 use config::keyassignment::{
-    ClipboardCopyDestination, KeyAssignment, MouseEventTrigger,
+    ClipboardCopyDestination, KeyAssignment, MouseEventTrigger, ScrollbackEraseMode,
 };
 use config::MouseEventAltScreen;
 use mux::pane::{Pane, WithPaneLines};
@@ -590,6 +590,34 @@ impl super::TermWindow {
                         self.launch_sftp_tool();
                     }
                 }
+                TabBarItem::ClearScreenButton => {
+                    // e641 清理按钮：先把回滚+视口全部文本存档到 exe 同目录
+                    // screen-shot/时间戳.txt（只保留最近 5 个），再做
+                    // ScrollbackAndViewport 清屏（效果同 clear）
+                    if let Some(pane) = self.get_active_pane_or_overlay() {
+                        let dims = pane.get_dimensions();
+                        let cols = dims.cols;
+                        let range = dims.scrollback_top
+                            ..dims.physical_top + dims.viewport_rows as StableRowIndex;
+                        let mut text = String::new();
+                        for logical in pane.get_logical_lines(range) {
+                            if !text.is_empty() {
+                                text.push('\n');
+                            }
+                            for phys in &logical.physical_lines {
+                                text.push_str(&phys.columns_as_str(0..cols));
+                            }
+                            // 去掉行尾补位的空白 cell
+                            let trimmed_len = text.trim_end().len();
+                            text.truncate(trimmed_len);
+                        }
+                        Self::archive_screen_text(&text);
+                        pane.erase_scrollback(ScrollbackEraseMode::ScrollbackAndViewport);
+                        if let Some(window) = self.window.as_ref() {
+                            window.invalidate();
+                        }
+                    }
+                }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
                     let maximized = self
                         .window_state
@@ -646,6 +674,7 @@ impl super::TermWindow {
                 | TabBarItem::WindowButton(_)
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
+                | TabBarItem::ClearScreenButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Press(MousePress::Right) => match item {
@@ -661,6 +690,7 @@ impl super::TermWindow {
                 | TabBarItem::WindowButton(_)
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
+                | TabBarItem::ClearScreenButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Move => match item {
@@ -682,6 +712,7 @@ impl super::TermWindow {
                 | TabBarItem::NewTabButton { .. }
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
+                | TabBarItem::ClearScreenButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::VertWheel(n) => {
@@ -1181,5 +1212,65 @@ fn mouse_press_to_tmb(press: &MousePress) -> TMB {
         MousePress::Left => TMB::Left,
         MousePress::Right => TMB::Right,
         MousePress::Middle => TMB::Middle,
+    }
+}
+
+impl super::TermWindow {
+    /// 清理按钮的存档：把文本写入 exe 同目录 screen-shot/年月日时分秒.txt，
+    /// 只保留最近 5 个，多余按文件名（即时间）从旧到新删除。
+    /// 存档失败只记日志，不阻断后续清屏。
+    fn archive_screen_text(text: &str) {
+        let exe_dir = match std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|d| d.to_path_buf()))
+        {
+            Some(dir) => dir,
+            None => {
+                log::error!("清屏存档失败：无法定位当前 exe 目录");
+                return;
+            }
+        };
+        let shot_dir = exe_dir.join("screen-shot");
+        if let Err(err) = std::fs::create_dir_all(&shot_dir) {
+            log::error!("清屏存档失败：无法创建 {}：{:#}", shot_dir.display(), err);
+            return;
+        }
+        // 年月日时分秒时间戳，如 20261014120530.txt；
+        // 同一秒内连点则追加 -1/-2 后缀避免覆盖
+        let stamp = chrono::Local::now().format("%Y%m%d%H%M%S").to_string();
+        let mut path = shot_dir.join(format!("{stamp}.txt"));
+        let mut dup = 0;
+        while path.exists() {
+            dup += 1;
+            path = shot_dir.join(format!("{stamp}-{dup}.txt"));
+        }
+        if let Err(err) = std::fs::write(&path, text) {
+            log::error!("清屏存档失败：无法写入 {}：{:#}", path.display(), err);
+            return;
+        }
+        // 滚动保留：按文件名排序（时间戳命名即时间序），只留最近 5 个
+        match std::fs::read_dir(&shot_dir) {
+            Ok(entries) => {
+                let mut files: Vec<_> = entries
+                    .filter_map(|e| e.ok())
+                    .map(|e| e.path())
+                    .filter(|p| {
+                        p.extension().map(|ext| ext == "txt").unwrap_or(false)
+                            && p.is_file()
+                    })
+                    .collect();
+                files.sort();
+                if files.len() > 5 {
+                    for old in files.iter().take(files.len() - 5) {
+                        if let Err(err) = std::fs::remove_file(old) {
+                            log::error!("清屏存档清理旧文件 {} 失败：{:#}", old.display(), err);
+                        }
+                    }
+                }
+            }
+            Err(err) => {
+                log::error!("清屏存档失败：无法列出 {}：{:#}", shot_dir.display(), err);
+            }
+        }
     }
 }

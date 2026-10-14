@@ -18,6 +18,8 @@ pub mod iconfont_glyph {
     pub const SETTINGS: char = '\u{e607}';
     pub const COPY: char = '\u{e65f}';
     pub const SFTP: char = '\u{e713}';
+    /// 清理缓存（U+E641）：先存档到 exe 同目录 screen-shot/ 再清屏
+    pub const CLEAR: char = '\u{e641}';
 }
 
 /// 标签栏按钮（+/齿轮/复制/SFTP）的图标默认蓝色；
@@ -469,6 +471,41 @@ impl crate::TermWindow {
                         .into(),
                     }))
                 }
+                TabBarItem::ClearScreenButton => {
+                    let new_tab = colors.new_tab();
+                    let new_tab_hover = colors.new_tab_hover();
+                    // iconfont 清理字形（U+E641），蓝色 + hover 提亮
+                    // （与齿轮/复制/SFTP 同风格）
+                    Element::new(
+                        &icon_font,
+                        ElementContent::Text(iconfont_glyph::CLEAR.to_string()),
+                    )
+                    .vertical_align(VerticalAlign::Middle)
+                    .item_type(UIItemType::TabBar(item.item.clone()))
+                    .margin(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.),
+                    })
+                    .padding(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.5),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.25),
+                    })
+                    .border(BoxDimension::new(Dimension::Pixels(1.)))
+                    .colors(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab.bg_color.to_linear().into(),
+                        text: button_colors::icon_blue().into(),
+                    })
+                    .hover_colors(Some(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab_hover.bg_color.to_linear().into(),
+                        text: button_colors::icon_blue_hover().into(),
+                    }))
+                }
             }
         };
 
@@ -479,6 +516,7 @@ impl crate::TermWindow {
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
                 | TabBarItem::SftpPanelButton
+                | TabBarItem::ClearScreenButton
                 | TabBarItem::Tab { .. } => 1.,
                 _ => 0.,
             })

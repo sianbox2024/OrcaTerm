@@ -6,6 +6,13 @@
   "description": "",
   "glyphs": [
     {
+      "icon_id": "6338153",
+      "name": "清理缓存",
+      "font_class": "qinglihuancun",
+      "unicode": "e641",
+      "unicode_decimal": 58945
+    },
+    {
       "icon_id": "36428450",
       "name": "SFTP",
       "font_class": "SFTP",

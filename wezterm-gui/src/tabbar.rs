@@ -50,6 +50,7 @@ pub enum TabBarItem {
     ConfigUIButton,
     CopyScreenButton,
     SftpPanelButton,
+    ClearScreenButton,
     WindowButton(IntegratedTitleButton),
 }
 
@@ -738,6 +739,38 @@ impl TabBarState {
             items.push(TabEntry {
                 item: TabBarItem::SftpPanelButton,
                 title: sftp_button.clone(),
+                x: button_start,
+                width,
+            });
+            x += width;
+        }
+
+        // Clear screen button（标签栏末尾）
+        {
+            // iconfont 清理字形（U+E641）；点击先把回滚+视口存档到
+            // exe 同目录 screen-shot/时间戳.txt（只留最近 5 个），
+            // 再做 ScrollbackAndViewport 清屏（效果同 clear）
+            let clear = "\u{e641}";
+            let clear_line = parse_status_text(
+                clear,
+                button_icon_attrs(BUTTON_ICON_BLUE, colors.background()),
+            );
+            let clear_hover_line = parse_status_text(
+                clear,
+                button_icon_attrs(BUTTON_ICON_BLUE_HOVER, colors.background()),
+            );
+            let hover = is_tab_hover(mouse_x, x, clear_line.len());
+            let clear_button = if hover {
+                &clear_hover_line
+            } else {
+                &clear_line
+            };
+            let button_start = x;
+            let width = clear_button.len();
+            line.append_line(clear_button.clone(), SEQ_ZERO);
+            items.push(TabEntry {
+                item: TabBarItem::ClearScreenButton,
+                title: clear_button.clone(),
                 x: button_start,
                 width,
             });
