@@ -11,6 +11,8 @@
   - SSH 连接管理器（主机 / 端口 / 用户名 / 私钥，校验后以 `ssh_domains` 形式写入 `orca-config.lua`，并与启动菜单集成）
   - 每连接「连接后执行命令」（如 `cd /data/project`），基于上游 `SshDomain.default_prog` 机制实现
   - 字体、配色、内边距等常用设置的图形化编辑
+- **标签栏增强** — 支持用鼠标拖动标签页调整顺序。标签栏末尾的清屏按钮会先把回滚内容和当前视口存档到可执行文件同目录的 `screen-shot/`（仅保留最近 5 份），然后再清屏。
+- **SSH 下的 Starship 提示符** — 连接远端主机时，OrcaTerm 会检测远端 shell 类型和架构，下载固定版本的 [Starship](https://starship.rs) 提示符程序，并包装远端 shell 的启动流程，使其使用 Starship 提示符。支持 bash、zsh 与 Fish 远端 shell。
 - **流水构建号** — 标签栏显示每次构建的标识（`Ver 1.0 build<日期.序号>`），便于把二进制追溯回代码提交。
 - **ConPTY 侧载** — 随包分发固定版本的 `conpty.dll` + `OpenConsole.exe`，使控制台行为不依赖系统版本（修复中文 Windows 上的乱码 / 退出落入 cmd 等问题）。
 - **管理员（提权）终端会话** — 启动菜单（右键标签栏 `+` 号）提供「新管理员CMD / 新管理员PowerShell 窗口」。选中后弹出 Windows UAC 确认框，确认后**打开一个以管理员令牌运行的新 OrcaTerm 窗口**；其中所有标签页均为管理员会话，标题自动带 `(管理员)` 前缀（基于 `TokenElevation` 的真实令牌检测，而非按进程名猜测）。
@@ -29,6 +31,17 @@
 ```
 
 产物输出到 `dist/`：`orca-term-gui.exe`、`orca-term.exe`（CLI）、`orca-term-config-ui.exe`。
+
+### 在 Linux 上交叉编译
+
+`build.sh` 可在 Linux 上使用 `x86_64-pc-windows-gnu` 目标交叉编译 Windows 版本（需要 MinGW 工具链）。脚本会分配构建号（`YYYYMMDD.NN` 格式，记录在 `build-id.txt` 中），并在 `Temp/build-history.log` 中追加一条记录。
+
+```bash
+./build.sh              # release 构建（默认）
+./build.sh debug        # debug 构建
+```
+
+产物同样输出到 `dist/`。
 
 ## 致谢
 
