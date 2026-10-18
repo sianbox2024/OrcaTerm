@@ -592,8 +592,8 @@ impl super::TermWindow {
                 }
                 TabBarItem::ClearScreenButton => {
                     // e641 清理按钮：先把回滚+视口全部文本存档到 exe 同目录
-                    // screen-shot/时间戳.txt（只保留最近 5 个），再做
-                    // ScrollbackAndViewport 清屏（效果同 clear）
+                    // screen-shot/时间戳.txt（只保留最近 5 个），再清空回滚
+                    // 并发送 Ctrl+L (\x0c) 由 shell/终端应用清屏并重绘提示符
                     if let Some(pane) = self.get_active_pane_or_overlay() {
                         let dims = pane.get_dimensions();
                         let cols = dims.cols;
@@ -612,7 +612,8 @@ impl super::TermWindow {
                             text.truncate(trimmed_len);
                         }
                         Self::archive_screen_text(&text);
-                        pane.erase_scrollback(ScrollbackEraseMode::ScrollbackAndViewport);
+                        pane.erase_scrollback(ScrollbackEraseMode::ScrollbackOnly);
+                        pane.writer().write_all(b"\x0c").ok();
                         if let Some(window) = self.window.as_ref() {
                             window.invalidate();
                         }

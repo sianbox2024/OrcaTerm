@@ -69,6 +69,8 @@ pub type SharedBounds = Rc<RefCell<Option<Bounds<Pixels>>>>;
 
 /// 水平滑块。bounds_cell 由父级持有，paint 时回写轨道几何，
 /// 父级鼠标事件据此把 x 换算成值。返回元素供父级继续挂鼠标监听。
+/// 圆点 16px：left 按轨道分数定位后向左收半个圆点（ml -8px），圆点中心落在刻度上；
+/// 满格时圆点右沿与轨道右沿齐平，不会盖住右侧数值。
 pub fn slider(
     id: &'static str,
     value: f32,
@@ -97,6 +99,7 @@ pub fn slider(
                         .absolute()
                         .top(px(-6.))
                         .left(relative(frac))
+                        .ml(px(-8.))
                         .size(px(16.))
                         .rounded_full()
                         .bg(theme::accent())

@@ -1,4 +1,4 @@
-﻿# 构建 orca-term 主程序并输出到 portable 分发目录。
+# 构建 orca-term 主程序并输出到 portable 分发目录。
 # 用法：pwsh ./build.ps1   （可选参数：-Profile release 用 --release 构建）
 param([string]$Profile = "debug")
 
@@ -68,11 +68,9 @@ Copy-Item -LiteralPath "$src\orca-term.exe" -Destination "dist\orca-term.exe" -F
 Copy-Item -LiteralPath "assets\windows\conhost\conpty.dll" -Destination "dist\conpty.dll" -Force
 Copy-Item -LiteralPath "assets\windows\conhost\OpenConsole.exe" -Destination "dist\OpenConsole.exe" -Force
 Copy-Item -LiteralPath "$configUiSrc\orca-term-config-ui.exe" -Destination "dist\orca-term-config-ui.exe" -Force
-# 随包默认 orca-config.lua（assets\orca-config.lua：本机 PowerShell 经
-# starship\ 子目录启用提示符的完整配置）。部署时覆盖到程序目录即为该
-# 配置；用户后续手改的配置在重新部署时需自行备份。
-if (Test-Path "assets\orca-config.lua") {
-    Copy-Item "assets\orca-config.lua" "dist\orca-config.lua" -Force
+# 不再随包生成 orca-config.lua（避免覆盖用户配置或强制生成配置文件）
+if (Test-Path "dist\orca-config.lua") {
+    Remove-Item "dist\orca-config.lua" -Force
 }
 
 # 附带 starship 二进制（与 build.sh 的 fetch_starship 保持一致）：

@@ -37,7 +37,7 @@ const INJECT_MODE_KEY: &str = "orcaterm.inject_prompt";
 const STARSHIP_LOCAL_KEY: &str = "orcaterm.starship_path";
 
 /// 远端 starship 的版本号;升级时改这里即可触发重新上传
-const STARSHIP_VERSION: &str = "1.26.0";
+const STARSHIP_VERSION: &str = "1.27.0";
 const DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(300);
 
 const BUILTIN_SCRIPT: &str = include_str!("orca_prompt_builtin.sh");

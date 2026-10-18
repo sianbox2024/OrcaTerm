@@ -749,7 +749,7 @@ impl TabBarState {
         {
             // iconfont 清理字形（U+E641）；点击先把回滚+视口存档到
             // exe 同目录 screen-shot/时间戳.txt（只留最近 5 个），
-            // 再做 ScrollbackAndViewport 清屏（效果同 clear）
+            // 再清空回滚并发送 Ctrl+L 由 shell 清屏并重绘提示符
             let clear = "\u{e641}";
             let clear_line = parse_status_text(
                 clear,

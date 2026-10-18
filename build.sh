@@ -187,13 +187,8 @@ fetch_starship
 cp -f "$SRC/orca-term-gui.exe" dist/
 cp -f "$SRC/orca-term.exe" dist/
 cp -f "$CONFIG_UI_SRC/orca-term-config-ui.exe" dist/
-
-# 随包默认 orca-config.lua（assets/orca-config.lua：本机 PowerShell 经
-# starship\ 子目录启用提示符的完整配置）。部署时覆盖到程序目录即为该
-# 配置；用户后续手改的配置在重新部署时需自行备份。
-if [ -f "$ROOT_DIR/assets/orca-config.lua" ]; then
-    cp -f "$ROOT_DIR/assets/orca-config.lua" "dist/orca-config.lua"
-fi
+# 不再随包生成 orca-config.lua（避免覆盖用户配置或强制生成配置文件）
+rm -f dist/orca-config.lua
 
 # 复制 ConPTY 运行时依赖
 cp -f "assets/windows/conhost/conpty.dll" dist/

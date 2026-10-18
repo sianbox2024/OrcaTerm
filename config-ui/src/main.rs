@@ -49,6 +49,23 @@ const OPACITY_MAX: f32 = 1.0;
 /// 已由手写滑条行渲染的注册表 key：通用行渲染器跳过，避免同屏出现两份控件
 const HAND_SLIDERS: &[&str] = &["font_size", "line_height", "window_background_opacity"];
 
+/// 滑条行右侧数值：固定宽度 + 右对齐 + 等宽字体，避免 99%→100% 位数变化造成视觉跳动。
+fn slider_value_box(text: String) -> gpui::Div {
+    div()
+        .w(px(64.))
+        .flex_shrink_0()
+        .text_right()
+        .font_family("JetBrains Mono")
+        .text_size(px(12.))
+        .text_color(theme::fg_dim())
+        .child(text)
+}
+
+/// 文本框行右侧占位：与滑条数值同宽，让文本框右沿与滑条轨道右沿对齐。
+fn slider_spacer() -> gpui::Div {
+    div().w(px(64.)).flex_shrink_0()
+}
+
 /// 默认键绑定动作的中文翻译映射
 fn default_binding_action_cn(action: &str) -> String {
     if action.starts_with("CopyTo") {
@@ -1044,12 +1061,15 @@ impl ConfigUi {
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.slider_down(SliderDrag::FontSize, e, w, cx)))
                             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.slider_move(SliderDrag::FontSize, e, w, cx)))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::slider_up)),
-                    ),
+                    )
+                    .child(slider_value_box(format!("{:.1}", self.form.scalars.float_at(font_idx)))),
             )
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("字体族"))
-                    .child(widgets::font_dropdown(
+                    .child(
+                        div().flex_1()
+                            .child(widgets::font_dropdown(
                         self.form.font_family.as_deref().unwrap_or("JetBrains Mono"),
                         self.font_family_open,
                         cx.listener(|this, _: &MouseDownEvent, _, _| {
@@ -1063,7 +1083,7 @@ impl ConfigUi {
                         cx.listener(|this, _: &MouseDownEvent, _, _| {
                             this.font_family_open = false;
                         }),
-                    )),
+                    ))),
             )
             .child(
                 div().flex().items_center().gap_2()
@@ -1074,7 +1094,8 @@ impl ConfigUi {
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.slider_down(SliderDrag::LineHeight, e, w, cx)))
                             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.slider_move(SliderDrag::LineHeight, e, w, cx)))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::slider_up)),
-                    ),
+                    )
+                    .child(slider_value_box(format!("{:.2}", self.form.scalars.float_at(line_idx)))),
             )
             .child(self.render_setting_rows(0, cx))
     }
@@ -1181,27 +1202,32 @@ impl ConfigUi {
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, w, cx| this.slider_down(SliderDrag::Opacity, e, w, cx)))
                             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, w, cx| this.slider_move(SliderDrag::Opacity, e, w, cx)))
                             .on_mouse_up(MouseButton::Left, cx.listener(Self::slider_up)),
-                    ),
+                    )
+                    .child(slider_value_box(format!("{:.0}%", self.form.scalars.float_at(opacity_idx) * 100.0))),
             )
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("内边距 左"))
-                    .child(self.input(&self.padding_left_input)),
+                    .child(div().flex_1().child(self.input(&self.padding_left_input)))
+                    .child(slider_spacer()),
             )
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("内边距 右"))
-                    .child(self.input(&self.padding_right_input)),
+                    .child(div().flex_1().child(self.input(&self.padding_right_input)))
+                    .child(slider_spacer()),
             )
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("内边距 上"))
-                    .child(self.input(&self.padding_top_input)),
+                    .child(div().flex_1().child(self.input(&self.padding_top_input)))
+                    .child(slider_spacer()),
             )
             .child(
                 div().flex().items_center().gap_2()
                     .child(div().w(px(180.)).text_size(px(13.)).text_color(theme::fg_main()).child("内边距 下"))
-                    .child(self.input(&self.padding_bottom_input)),
+                    .child(div().flex_1().child(self.input(&self.padding_bottom_input)))
+                    .child(slider_spacer()),
             )
             .child(self.render_setting_rows(2, cx))
     }
