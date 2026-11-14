@@ -121,7 +121,7 @@ impl crate::TermWindow {
         let mut left_eles = vec![];
         let mut right_eles = vec![];
         // 新标签（+）按钮单独收集：有标签时紧随最后一个标签入左列，
-        // 零标签空窗口时回归右侧按钮组首位（见下方分流注释）
+        // 零标签空窗口时落回右侧按钮组历史槽位（见下方分流注释）
         let mut new_tab_eles = vec![];
         let bar_colors = ElementColors {
             border: BorderColor::default(),
@@ -598,7 +598,7 @@ impl crate::TermWindow {
                 }
                 // 新标签（+）按钮：有标签时跟随最后一个标签（符合「新建标签」
                 // 操作习惯，参照 Windows Terminal/浏览器），零标签空窗口时
-                // 回归右侧按钮组首位，避免孤悬最左缘
+                // 落回按钮组历史槽位（状态元素之后），避免孤悬最左缘
                 TabBarItem::NewTabButton => new_tab_eles.push(item_to_elem(item)),
                 // 其余变体即按钮组（齿轮/复制/SFTP/清屏/发送指令）：
                 // 全部 push 进右侧浮动容器实现右对齐，push 顺序即屏幕上从左到右
@@ -634,8 +634,8 @@ impl crate::TermWindow {
         };
 
         // + 按钮分流：有标签时并入左列尾部（紧随最后一个标签），零标签
-        // 空窗口时插回右侧按钮组首位——无「最后一个标签」可依托，保持
-        // 历史位置避免孤悬最左缘
+        // 空窗口时落回右侧按钮组历史槽位——无「最后一个标签」可依托，
+        // 沿用历史位置避免孤悬最左缘
         let num_tabs = left_eles
             .iter()
             .filter(|e| matches!(e.item_type, Some(UIItemType::TabBar(TabBarItem::Tab { .. }))))
@@ -656,7 +656,15 @@ impl crate::TermWindow {
         if new_tab_follows_tabs {
             left_eles.append(&mut new_tab_eles);
         } else {
-            right_eles.splice(0..0, new_tab_eles.drain(..));
+            // 历史槽位：items 装配序中 RightStatus 无条件先于按钮组
+            // （tabbar.rs:849-854），旧代码 + 因此落在状态元素之后、齿轮等
+            // 按钮之前。跳过前导状态元素（status 三变体统一携带 None 型
+            // item_type，见 item_to_elem 状态分支）后插入，逐元素还原历史顺序
+            let status_prefix = right_eles
+                .iter()
+                .take_while(|e| matches!(e.item_type, Some(UIItemType::TabBar(TabBarItem::None))))
+                .count();
+            right_eles.splice(status_prefix..status_prefix, new_tab_eles.drain(..));
         }
 
         // 精确测量右侧按钮组（齿轮/复制/SFTP/清屏/发送指令/窗口按钮；零标签时含 +）的实际像素宽度
@@ -873,7 +881,10 @@ fn make_x_button(
 /// 计算标签在可用空间内的宽度分配：
 /// 1. 标签少时（如 1-3 个），宽度限制在舒适的上限（max_tab_px，默认约 180-240px），避免单个标签拉伸成巨大条状；
 /// 2. 标签逐渐增多时（如 4-15 个），均匀填满标签区至右侧按钮区左缘，彻底消除空白死区（Issue/1.png 红框）；
-/// 3. 标签很多时（如 20+ 个），保证每个标签不低于最小保底宽（min_tab_px = 36px），确保关闭按钮与内容可交互。
+/// 3. 标签很多时（ideal 低于保底宽），收缩适配：直接采用均分宽，标签收窄到恰好装下——
+///    若钳到保底宽会把整行撑溢出，将末尾标签连同 + 按钮压进右浮按钮组下方
+///    （布局引擎不裁剪、按钮组 zindex 更高，2026-11-14 真机复现：13 标签 ×
+///    大字号 scale≈1.9 → 保底 69px > 均分 66.5px → 第 13 个标签藏进按钮排）。
 pub fn compute_tab_width(
     available_tab_area: f32,
     num_tabs: usize,
@@ -891,7 +902,13 @@ pub fn compute_tab_width(
     let max_tab_px = (tab_max_width_cells as f32 * cell_w + 32.0 * scale)
         .clamp(180.0 * scale, 240.0 * scale);
     let min_tab_px = 36.0 * scale;
-    ideal_tab_width.clamp(min_tab_px, max_tab_px)
+    // 收缩适配（2026-11-14 人工拍板）：均分宽低于保底时弃保底，保「永不压按钮组」。
+    // 收缩结果由可用区驱动，与 scale 无关；上限钳制保留，少标签时仍不膨胀。
+    if ideal_tab_width >= min_tab_px {
+        ideal_tab_width.min(max_tab_px)
+    } else {
+        ideal_tab_width
+    }
 }
 
 #[cfg(test)]
@@ -923,25 +940,42 @@ mod tests {
     }
 
     #[test]
-    fn test_compute_tab_width_overflow_tabs_guarantees_min() {
-        // 极多标签：30 个标签在 865.5px，理想宽 28.85px，保底为 36.0px
+    fn test_compute_tab_width_overflow_shrinks_to_fit() {
+        // 极多标签：30 个标签在 865.5px，均分宽 28.85px 低于 36px 保底 →
+        // 收缩适配：弃保底直接采用均分宽，行恰好装下，不再压入按钮组
         let available = 865.5;
         let cell_w = 9.0;
         let max_cells = 16;
         let w30 = compute_tab_width(available, 30, max_cells, cell_w);
-        assert_eq!(w30, 36.0);
+        assert!((w30 - 865.5 / 30.0).abs() < 1e-4);
+        assert!((w30 * 30.0 - available).abs() < 1e-4, "30 个标签总宽必须恰好装满可用区");
     }
 
     #[test]
     fn test_compute_tab_width_scales_with_cell_width() {
-        // 高 DPI（cell_w=18，200%）：全部物理像素常数等比翻倍，
-        // 折合逻辑像素与 96 DPI 基准一致（金鱼盲审条件三）
+        // 高 DPI（cell_w=18，200%）：上限 clamp 等比翻倍（金鱼盲审条件三）；
+        // 收缩分支结果由可用区驱动、与 scale 无关（收缩语义 2026-11-14 拍板）
         let available = 865.5;
         let max_cells = 16;
         let w1 = compute_tab_width(available, 1, max_cells, 18.0);
         assert_eq!(w1, 360.0, "上限 clamp 应随 cell 宽翻倍（180→360px）");
         let w30 = compute_tab_width(available, 30, max_cells, 18.0);
-        assert_eq!(w30, 72.0, "保底宽应随 cell 宽翻倍（36→72px）");
-        // 逻辑语义不变：360/2=180px、72/2=36px
+        assert!(
+            (w30 - 865.5 / 30.0).abs() < 1e-4,
+            "低于保底时收缩装下，不再钳到翻倍保底 72px"
+        );
+    }
+
+    #[test]
+    fn test_compute_tab_width_floor_bound_never_overlaps_buttons() {
+        // 2026-11-14 真机复现场景（Issue/1.png）：大字号 cell_w=17.3（scale≈1.92），
+        // 保底 36×1.92≈69.1px > 13 标签均分 66.5px → 旧语义钳到保底致整行溢出
+        // ~37px，第 13 个标签被压进按钮组下方；收缩适配后必须恰好装下
+        let available = 864.0;
+        let cell_w = 17.3;
+        let max_cells = 16;
+        let w13 = compute_tab_width(available, 13, max_cells, cell_w);
+        assert!((w13 - available / 13.0).abs() < 1e-4);
+        assert!(w13 * 13.0 <= available + 1e-4, "行宽不得超出可用区（不再压按钮组）");
     }
 }
