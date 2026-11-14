@@ -1,15 +1,6 @@
 fn main() {
-    // 标签栏版本标识（ORCA_BUILD_ID）：build.ps1 每次构建前写 build-id.txt（日期.当日序号），
-    // 此处读入并编译进二进制；文件变化触发重编。直接 cargo build（不经 build.ps1）时文件
-    // 可能不存在，退化为 dev。
-    println!("cargo:rerun-if-changed=../build-id.txt");
-    let build_id = std::fs::read_to_string("../build-id.txt")
-        .map(|s| s.trim().to_string())
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "dev".to_string());
-    println!("cargo:rustc-env=ORCA_BUILD_ID={build_id}");
-
+    // 标签栏右端的版本标识已移除（版本号改由 config-ui「关于」页展示，其
+    // build.rs 自行读 build-id.txt），此处不再注入 ORCA_BUILD_ID。
     println!("cargo:rerun-if-changed=build.rs");
 
     // 必须按「目标平台」判断，不能用 #[cfg(windows)]：本工程在 Linux 上交叉编译

@@ -210,6 +210,19 @@ pub struct SpawnCommand {
 }
 impl_lua_conversion_dynamic!(SpawnCommand);
 
+/// 标签栏「发送指令」按钮（U+E6E4）弹出列表中的一个条目：
+/// label 为列表显示文本（留空时回退显示 command），command 为选中后
+/// 向当前终端发送的指令文本（GUI 侧自动补回车执行）。
+/// 由设置界面「标签栏」页的「发送指令列表」编辑器管理。
+#[derive(Default, Debug, Clone, PartialEq, FromDynamic, ToDynamic)]
+pub struct TabButtonCommand {
+    #[dynamic(default)]
+    pub label: String,
+    #[dynamic(default)]
+    pub command: String,
+}
+impl_lua_conversion_dynamic!(TabButtonCommand);
+
 impl std::fmt::Debug for SpawnCommand {
     fn fmt(&self, fmt: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(fmt, "{}", self)

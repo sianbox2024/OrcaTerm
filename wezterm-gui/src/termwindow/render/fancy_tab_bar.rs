@@ -20,6 +20,9 @@ pub mod iconfont_glyph {
     pub const SFTP: char = '\u{e713}';
     /// 清理缓存（U+E641）：先存档到 exe 同目录 screen-shot/ 再清屏
     pub const CLEAR: char = '\u{e641}';
+    /// 发送指令（U+E6E4，cloudshell 云命令行）：点击弹出 tab_button_commands
+    /// 指令选择列表
+    pub const SEND: char = '\u{e6e4}';
 }
 
 /// 标签栏按钮（+/齿轮/复制/SFTP）的图标默认蓝色；
@@ -506,24 +509,44 @@ impl crate::TermWindow {
                         text: button_colors::icon_blue_hover().into(),
                     }))
                 }
+                TabBarItem::SendCommandButton => {
+                    let new_tab = colors.new_tab();
+                    let new_tab_hover = colors.new_tab_hover();
+                    // iconfont 云命令行字形（U+E6E4），蓝色 + hover 提亮
+                    // （与齿轮/复制/SFTP/清屏同风格）；按钮常显，指令为空时
+                    // 点击打开设置窗体引导填写（mouseevent.rs）
+                    Element::new(
+                        &icon_font,
+                        ElementContent::Text(iconfont_glyph::SEND.to_string()),
+                    )
+                    .vertical_align(VerticalAlign::Middle)
+                    .item_type(UIItemType::TabBar(item.item.clone()))
+                    .margin(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.),
+                    })
+                    .padding(BoxDimension {
+                        left: Dimension::Cells(0.5),
+                        right: Dimension::Cells(0.5),
+                        top: Dimension::Cells(0.2),
+                        bottom: Dimension::Cells(0.25),
+                    })
+                    .border(BoxDimension::new(Dimension::Pixels(1.)))
+                    .colors(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab.bg_color.to_linear().into(),
+                        text: button_colors::icon_blue().into(),
+                    })
+                    .hover_colors(Some(ElementColors {
+                        border: BorderColor::default(),
+                        bg: new_tab_hover.bg_color.to_linear().into(),
+                        text: button_colors::icon_blue_hover().into(),
+                    }))
+                }
             }
         };
-
-        let num_tabs: f32 = items
-            .iter()
-            .map(|item| match item.item {
-                TabBarItem::NewTabButton
-                | TabBarItem::ConfigUIButton
-                | TabBarItem::CopyScreenButton
-                | TabBarItem::SftpPanelButton
-                | TabBarItem::ClearScreenButton
-                | TabBarItem::Tab { .. } => 1.,
-                _ => 0.,
-            })
-            .sum();
-        let max_tab_width = ((self.dimensions.pixel_width as f32 / num_tabs)
-            - (1.5 * metrics.cell_size.width as f32))
-            .max(0.);
 
         // Reserve space for the native titlebar buttons
         if self
@@ -558,7 +581,6 @@ impl crate::TermWindow {
                 }
                 TabBarItem::Tab { tab_idx, active } => {
                     let mut elem = item_to_elem(item);
-                    elem.max_width = Some(Dimension::Pixels(max_tab_width));
                     elem.content = match elem.content {
                         ElementContent::Text(_) => unreachable!(),
                         ElementContent::Poly { .. } => unreachable!(),
@@ -571,18 +593,65 @@ impl crate::TermWindow {
                     };
                     left_eles.push(elem);
                 }
-                _ => left_eles.push(item_to_elem(item)),
+                // 其余变体即按钮组（新标签/齿轮/复制/SFTP/清屏/发送指令）：
+                // 全部 push 进右侧浮动容器实现右对齐，push 顺序即屏幕上从左到右
+                _ => right_eles.push(item_to_elem(item)),
             }
         }
 
-        let mut children = vec![];
+        let border = self.get_os_border();
+        let total_bar_width = (self.dimensions.pixel_width as f32
+            - (border.left + border.right).get() as f32)
+            .max(0.0);
 
-        if !left_status.is_empty() {
-            children.push(
-                Element::new(&font, ElementContent::Children(left_status))
-                    .colors(bar_colors.clone()),
-            );
-        }
+        let layout_context = LayoutContext {
+            height: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: self.dimensions.pixel_height as f32,
+                pixel_cell: metrics.cell_size.height as f32,
+            },
+            width: DimensionContext {
+                dpi: self.dimensions.dpi as f32,
+                pixel_max: total_bar_width,
+                pixel_cell: metrics.cell_size.width as f32,
+            },
+            bounds: euclid::rect(
+                border.left.get() as f32,
+                0.,
+                total_bar_width,
+                tab_bar_height,
+            ),
+            metrics: &metrics,
+            gl_state: self.render_state.as_ref().unwrap(),
+            zindex: 10,
+        };
+
+        // 精确测量右侧按钮组（+/齿轮/复制/SFTP/清屏/发送指令/窗口按钮）的实际像素宽度
+        let right_width = if right_eles.is_empty() {
+            0.0
+        } else {
+            let right_probe = Element::new(
+                &font,
+                ElementContent::Children(right_eles.clone()),
+            )
+            .colors(bar_colors.clone());
+            self.compute_element(&layout_context, &right_probe)?
+                .bounds
+                .width()
+        };
+
+        let left_status_width = if left_status.is_empty() {
+            0.0
+        } else {
+            let left_probe = Element::new(
+                &font,
+                ElementContent::Children(left_status.clone()),
+            )
+            .colors(bar_colors.clone());
+            self.compute_element(&layout_context, &left_probe)?
+                .bounds
+                .width()
+        };
 
         let window_buttons_at_left = self
             .config
@@ -608,33 +677,48 @@ impl crate::TermWindow {
             Dimension::Cells(0.5)
         };
 
-        // 标签栏右端常驻版本标识：Ver主.次 build<日期.序号>（build.ps1 构建前写入
-        // build-id.txt、编译期注入），格式如 build20260905.01；构建号↔commit 对照见
-        // Temp\build-history.log。用于肉眼确认窗口进程是否为最新构建。
-        let pkg_ver = env!("CARGO_PKG_VERSION");
-        let pkg_ver = &pkg_ver[..pkg_ver.rfind('.').unwrap_or(pkg_ver.len())];
-        right_eles.push(
-            Element::new(
-                &font,
-                ElementContent::Text(format!("Ver{pkg_ver} build{}", env!("ORCA_BUILD_ID"))),
-            )
-            .item_type(UIItemType::TabBar(TabBarItem::None))
-            .line_height(Some(1.75))
-            .margin(BoxDimension {
-                left: Dimension::Cells(0.),
-                right: Dimension::Cells(0.),
-                top: Dimension::Cells(0.),
-                bottom: Dimension::Cells(0.),
-            })
-            .padding(BoxDimension {
-                left: Dimension::Cells(0.5),
-                right: Dimension::Cells(0.5),
-                top: Dimension::Cells(0.),
-                bottom: Dimension::Cells(0.),
-            })
-            .border(BoxDimension::new(Dimension::Pixels(0.)))
-            .colors(bar_colors.clone()),
-        );
+        let left_padding_px = left_padding.evaluate_as_pixels(layout_context.width);
+
+        // 标签可用总像素区间：从左侧 padding / 状态文本之后，一直延伸到右侧按钮组左缘。
+        // 彻底消除标签与右侧按钮组之间的空白死区（Issue/1.png 红框区域）。
+        let available_tab_area = (total_bar_width
+            - right_width
+            - left_padding_px
+            - left_status_width)
+            .max(0.0);
+
+        let num_tabs = left_eles
+            .iter()
+            .filter(|e| matches!(e.item_type, Some(UIItemType::TabBar(TabBarItem::Tab { .. }))))
+            .count();
+
+        if num_tabs > 0 {
+            let cell_w = metrics.cell_size.width as f32;
+            let tab_width = compute_tab_width(
+                available_tab_area,
+                num_tabs,
+                self.config.tab_max_width,
+                cell_w,
+            );
+            let border_and_padding_width = cell_w + 2.0;
+            let content_width = (tab_width - border_and_padding_width).max(0.0);
+
+            for elem in left_eles.iter_mut() {
+                if matches!(elem.item_type, Some(UIItemType::TabBar(TabBarItem::Tab { .. }))) {
+                    elem.min_width = Some(Dimension::Pixels(content_width));
+                    elem.max_width = Some(Dimension::Pixels(tab_width));
+                }
+            }
+        }
+
+        let mut children = vec![];
+
+        if !left_status.is_empty() {
+            children.push(
+                Element::new(&font, ElementContent::Children(left_status))
+                    .colors(bar_colors.clone()),
+            );
+        }
 
         children.push(
             Element::new(&font, ElementContent::Children(left_eles))
@@ -648,10 +732,13 @@ impl crate::TermWindow {
                 })
                 .zindex(1),
         );
+        // zindex(2) 高于左侧标签容器的 zindex(1)：标签溢出时按钮组保持置顶
+        // 可点击（ui_items 逆序命中也保证按钮优先于重叠的标签）
         children.push(
             Element::new(&font, ElementContent::Children(right_eles))
                 .colors(bar_colors.clone())
-                .float(Float::Right),
+                .float(Float::Right)
+                .zindex(2),
         );
 
         let content = ElementContent::Children(children);
@@ -664,32 +751,7 @@ impl crate::TermWindow {
             .vertical_align(VerticalAlign::Bottom)
             .colors(bar_colors);
 
-        let border = self.get_os_border();
-
-        let mut computed = self.compute_element(
-            &LayoutContext {
-                height: DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.dimensions.pixel_height as f32,
-                    pixel_cell: metrics.cell_size.height as f32,
-                },
-                width: DimensionContext {
-                    dpi: self.dimensions.dpi as f32,
-                    pixel_max: self.dimensions.pixel_width as f32,
-                    pixel_cell: metrics.cell_size.width as f32,
-                },
-                bounds: euclid::rect(
-                    border.left.get() as f32,
-                    0.,
-                    self.dimensions.pixel_width as f32 - (border.left + border.right).get() as f32,
-                    tab_bar_height,
-                ),
-                metrics: &metrics,
-                gl_state: self.render_state.as_ref().unwrap(),
-                zindex: 10,
-            },
-            &tabs,
-        )?;
+        let mut computed = self.compute_element(&layout_context, &tabs)?;
 
         computed.translate(euclid::vec2(
             0.,
@@ -775,4 +837,62 @@ fn make_x_button(
         top: Dimension::Cells(0.),
         bottom: Dimension::Cells(0.),
     })
+}
+
+/// 计算标签在可用空间内的宽度分配：
+/// 1. 标签少时（如 1-3 个），宽度限制在舒适的上限（max_tab_px，默认约 180-240px），避免单个标签拉伸成巨大条状；
+/// 2. 标签逐渐增多时（如 4-15 个），均匀填满标签区至右侧按钮区左缘，彻底消除空白死区（Issue/1.png 红框）；
+/// 3. 标签很多时（如 20+ 个），保证每个标签不低于最小保底宽（min_tab_px = 36px），确保关闭按钮与内容可交互。
+pub fn compute_tab_width(
+    available_tab_area: f32,
+    num_tabs: usize,
+    tab_max_width_cells: usize,
+    cell_w: f32,
+) -> f32 {
+    if num_tabs == 0 {
+        return 0.0;
+    }
+    let ideal_tab_width = available_tab_area / num_tabs as f32;
+    let max_tab_px = (tab_max_width_cells as f32 * cell_w + 32.0).clamp(180.0, 240.0);
+    let min_tab_px = 36.0;
+    ideal_tab_width.clamp(min_tab_px, max_tab_px)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compute_tab_width;
+
+    #[test]
+    fn test_compute_tab_width_few_tabs_capped() {
+        let available = 865.5;
+        let cell_w = 9.0;
+        let max_cells = 16;
+        // 1 个标签：不应膨胀到 865.5px，应被上限 clamp（16 * 9 + 32 = 176px，clamp到180px）
+        let w1 = compute_tab_width(available, 1, max_cells, cell_w);
+        assert_eq!(w1, 180.0);
+    }
+
+    #[test]
+    fn test_compute_tab_width_issue_1_twelve_tabs_fills_area() {
+        // Issue/1.png 场景：865.5px 可用区间，12 个标签
+        let available = 865.5;
+        let cell_w = 9.0;
+        let max_cells = 16;
+        let w12 = compute_tab_width(available, 12, max_cells, cell_w);
+        // 865.5 / 12 = 72.125px
+        assert!((w12 - 72.125).abs() < 1e-4);
+        // 12 个标签总宽覆盖全部可用空间，与右侧按钮无缝衔接
+        let total = w12 * 12.0;
+        assert!((total - available).abs() < 1e-4);
+    }
+
+    #[test]
+    fn test_compute_tab_width_overflow_tabs_guarantees_min() {
+        // 极多标签：30 个标签在 865.5px，理想宽 28.85px，保底为 36.0px
+        let available = 865.5;
+        let cell_w = 9.0;
+        let max_cells = 16;
+        let w30 = compute_tab_width(available, 30, max_cells, cell_w);
+        assert_eq!(w30, 36.0);
+    }
 }

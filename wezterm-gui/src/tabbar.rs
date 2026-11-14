@@ -51,6 +51,9 @@ pub enum TabBarItem {
     CopyScreenButton,
     SftpPanelButton,
     ClearScreenButton,
+    /// 发送指令按钮（U+E6E4）：点击弹出 tab_button_commands 指令选择列表，
+    /// 选中即向当前终端发送该指令 + 回车
+    SendCommandButton,
     WindowButton(IntegratedTitleButton),
 }
 
@@ -106,14 +109,23 @@ fn call_format_tab_title(
                     let esc = format_as_escapes(items.clone())?;
                     let line = parse_status_text(&esc, CellAttributes::default());
 
+                    let (items, len) = if line.len() == 0 {
+                        (vec![FormatItem::Text("终端".to_string())], 2)
+                    } else {
+                        (items, line.len())
+                    };
+
                     Ok(Some(TitleText {
                         items,
-                        len: line.len(),
+                        len,
                         has_indeterminate: false,
                     }))
                 }
                 _ => {
-                    let s = String::from_lua(v, &*lua)?;
+                    let mut s = String::from_lua(v, &*lua)?;
+                    if s.trim().is_empty() {
+                        s = "终端".to_string();
+                    }
                     let line = parse_status_text(&s, CellAttributes::default());
                     Ok(Some(TitleText {
                         len: line.len(),
@@ -243,6 +255,9 @@ fn compute_tab_title(
                 } else {
                     tab.tab_title.clone()
                 };
+                if title.trim().is_empty() {
+                    title = "终端".to_string();
+                }
 
                 let classic_spacing = if config.use_fancy_tab_bar { "" } else { " " };
                 if config.show_tab_index_in_tab_bar {
@@ -512,8 +527,13 @@ impl TabBarState {
         let titles_len: usize = tab_titles.iter().map(|s| s.len).sum();
         let number_of_tabs = tab_titles.len();
 
-        let available_cells =
-            title_width.saturating_sub(number_of_tabs.saturating_sub(1) + new_tab.len());
+        // 可用标签宽 = 整行宽 − 标签间分隔符 − 新标签按钮 − 右侧 5 个常显单格
+        // 图标按钮（齿轮/复制/SFTP/清屏/发送指令）。按钮组已右对齐（buttons_x0 =
+        // title_width − buttons_width），不预留这 5 格时，标签多触发均分收敛后
+        // 总宽会填满整行、尾部压到按钮区底下。
+        let available_cells = title_width
+            .saturating_sub(number_of_tabs.saturating_sub(1) + new_tab.len())
+            .saturating_sub(5);
         let tab_width_max = if config.use_fancy_tab_bar || available_cells >= titles_len {
             // We can render each title with its full width
             usize::max_value()
@@ -621,25 +641,21 @@ impl TabBarState {
             x += width;
         }
 
+        // ===== 右侧按钮区（整体右对齐）=====
+        // 分两步构建：先为每个按钮生成常态/hover 两条 Line 并汇总总宽，
+        // 待下方扣除集成标题按钮预留区、统一决定按钮区起始 x 后，再按位置
+        // 挑选 hover 形态并装配。屏幕上从左到右的按钮顺序：
+        // 新标签 → 齿轮 → 复制 → SFTP → 清屏 → 发送指令。
+        let mut button_specs: Vec<(TabBarItem, Line, Line, usize)> = Vec::new();
+
         // New tab button
         if config.show_new_tab_button_in_tab_bar {
-            let hover = is_tab_hover(mouse_x, x, new_tab_hover.len());
-
-            let new_tab_button = if hover { &new_tab_hover } else { &new_tab };
-
-            let button_start = x;
-            let width = new_tab_button.len();
-
-            line.append_line(new_tab_button.clone(), SEQ_ZERO);
-
-            items.push(TabEntry {
-                item: TabBarItem::NewTabButton,
-                title: new_tab_button.clone(),
-                x: button_start,
-                width,
-            });
-
-            x += width;
+            button_specs.push((
+                TabBarItem::NewTabButton,
+                new_tab.clone(),
+                new_tab_hover.clone(),
+                new_tab.len(),
+            ));
         }
 
         // Config UI button
@@ -656,28 +672,18 @@ impl TabBarState {
                 gear,
                 button_icon_attrs(BUTTON_ICON_BLUE_HOVER, colors.background()),
             );
-            let hover = is_tab_hover(mouse_x, x, gear_line.len());
-            let gear_button = if hover { &gear_hover_line } else { &gear_line };
-            let button_start = x;
-            let width = gear_button.len();
-            line.append_line(gear_button.clone(), SEQ_ZERO);
-            items.push(TabEntry {
-                item: TabBarItem::ConfigUIButton,
-                title: gear_button.clone(),
-                x: button_start,
-                width,
-            });
-            x += width;
+            let width = gear_line.len();
+            button_specs.push((TabBarItem::ConfigUIButton, gear_line, gear_hover_line, width));
         }
 
         // Copy screen button
         {
             // iconfont 复制字形（U+E65F）；反馈期 ✓ 绿色表示已复制
             let copy_icon = if copy_button_feedback { "✓" } else { "\u{e65f}" };
-            let copy_fg = if copy_button_feedback {
-                BUTTON_ICON_GREEN
+            let (copy_fg, copy_hover_fg) = if copy_button_feedback {
+                (BUTTON_ICON_GREEN, BUTTON_ICON_GREEN)
             } else {
-                BUTTON_ICON_BLUE
+                (BUTTON_ICON_BLUE, BUTTON_ICON_BLUE_HOVER)
             };
             let copy_line = parse_status_text(
                 copy_icon,
@@ -685,27 +691,10 @@ impl TabBarState {
             );
             let copy_hover_line = parse_status_text(
                 copy_icon,
-                button_icon_attrs(
-                    if copy_button_feedback {
-                        BUTTON_ICON_GREEN
-                    } else {
-                        BUTTON_ICON_BLUE_HOVER
-                    },
-                    colors.background(),
-                ),
+                button_icon_attrs(copy_hover_fg, colors.background()),
             );
-            let hover = is_tab_hover(mouse_x, x, copy_line.len());
-            let copy_button = if hover { &copy_hover_line } else { &copy_line };
-            let button_start = x;
-            let width = copy_button.len();
-            line.append_line(copy_button.clone(), SEQ_ZERO);
-            items.push(TabEntry {
-                item: TabBarItem::CopyScreenButton,
-                title: copy_button.clone(),
-                x: button_start,
-                width,
-            });
-            x += width;
+            let width = copy_line.len();
+            button_specs.push((TabBarItem::CopyScreenButton, copy_line, copy_hover_line, width));
         }
 
         // SFTP panel button
@@ -713,15 +702,10 @@ impl TabBarState {
             // iconfont SFTP 字形（U+E713）。SSH 标签:蓝色 + hover 提亮
             // (与齿轮/复制同风格);非 SSH 标签:灰色不可用,点击无效。
             let sftp = "\u{e713}";
-            let sftp_fg = if sftp_enabled {
-                BUTTON_ICON_BLUE
+            let (sftp_fg, sftp_hover_fg) = if sftp_enabled {
+                (BUTTON_ICON_BLUE, BUTTON_ICON_BLUE_HOVER)
             } else {
-                BUTTON_ICON_DIM
-            };
-            let sftp_hover_fg = if sftp_enabled {
-                BUTTON_ICON_BLUE_HOVER
-            } else {
-                BUTTON_ICON_DIM
+                (BUTTON_ICON_DIM, BUTTON_ICON_DIM)
             };
             let sftp_line = parse_status_text(
                 sftp,
@@ -731,21 +715,11 @@ impl TabBarState {
                 sftp,
                 button_icon_attrs(sftp_hover_fg, colors.background()),
             );
-            let hover = is_tab_hover(mouse_x, x, sftp_line.len());
-            let sftp_button = if hover { &sftp_hover_line } else { &sftp_line };
-            let button_start = x;
-            let width = sftp_button.len();
-            line.append_line(sftp_button.clone(), SEQ_ZERO);
-            items.push(TabEntry {
-                item: TabBarItem::SftpPanelButton,
-                title: sftp_button.clone(),
-                x: button_start,
-                width,
-            });
-            x += width;
+            let width = sftp_line.len();
+            button_specs.push((TabBarItem::SftpPanelButton, sftp_line, sftp_hover_line, width));
         }
 
-        // Clear screen button（标签栏末尾）
+        // Clear screen button
         {
             // iconfont 清理字形（U+E641）；点击先把回滚+视口存档到
             // exe 同目录 screen-shot/时间戳.txt（只留最近 5 个），
@@ -759,22 +733,31 @@ impl TabBarState {
                 clear,
                 button_icon_attrs(BUTTON_ICON_BLUE_HOVER, colors.background()),
             );
-            let hover = is_tab_hover(mouse_x, x, clear_line.len());
-            let clear_button = if hover {
-                &clear_hover_line
-            } else {
-                &clear_line
-            };
-            let button_start = x;
-            let width = clear_button.len();
-            line.append_line(clear_button.clone(), SEQ_ZERO);
-            items.push(TabEntry {
-                item: TabBarItem::ClearScreenButton,
-                title: clear_button.clone(),
-                x: button_start,
+            let width = clear_line.len();
+            button_specs.push((TabBarItem::ClearScreenButton, clear_line, clear_hover_line, width));
+        }
+
+        // Send command button
+        {
+            // iconfont 云命令行字形（U+E6E4）。按钮常显：点击弹出
+            // config.tab_button_commands 指令选择列表（选中即发送），
+            // 列表为空时由 show_command_sender 转去打开设置窗体引导填写
+            let send = "\u{e6e4}";
+            let send_line = parse_status_text(
+                send,
+                button_icon_attrs(BUTTON_ICON_BLUE, colors.background()),
+            );
+            let send_hover_line = parse_status_text(
+                send,
+                button_icon_attrs(BUTTON_ICON_BLUE_HOVER, colors.background()),
+            );
+            let width = send_line.len();
+            button_specs.push((
+                TabBarItem::SendCommandButton,
+                send_line,
+                send_hover_line,
                 width,
-            });
-            x += width;
+            ));
         }
 
         // Reserve place for integrated title buttons
@@ -826,13 +809,47 @@ impl TabBarState {
             title_width
         };
 
-        let status_space_available = title_width.saturating_sub(x);
+        let buttons_width: usize = button_specs.iter().map(|spec| spec.3).sum();
+        // 按钮整体右对齐的前提：标签之后仍有足够空间放下全部按钮；
+        // 空间不足时回退为紧跟标签排布（原行为），避免按钮与标签重叠
+        let right_aligned = x + buttons_width <= title_width;
+        let buttons_x0 = if right_aligned {
+            title_width - buttons_width
+        } else {
+            x
+        };
+        // RightStatus 空间：右对齐时为标签与按钮区之间的空隙；回退时为按钮之后的余量
+        let (status_x, status_space_available) = if right_aligned {
+            (x, buttons_x0 - x)
+        } else {
+            (
+                buttons_x0 + buttons_width,
+                title_width.saturating_sub(buttons_x0 + buttons_width),
+            )
+        };
+
+        // hover 依赖最终 x：按钮区起始位置确定后才挑选常态/hover Line 并生成 TabEntry
+        let mut button_entries: Vec<TabEntry> = Vec::new();
+        let mut button_lines: Vec<Line> = Vec::new();
+        let mut bx = buttons_x0;
+        for (item, normal_line, hover_line, width) in button_specs {
+            let hover = is_tab_hover(mouse_x, bx, width);
+            let chosen = if hover { hover_line } else { normal_line };
+            button_entries.push(TabEntry {
+                item,
+                title: chosen.clone(),
+                x: bx,
+                width,
+            });
+            button_lines.push(chosen);
+            bx += width;
+        }
 
         let mut right_status_line = parse_status_text(right_status, black_cell.attrs().clone());
         items.push(TabEntry {
             item: TabBarItem::RightStatus,
             title: right_status_line.clone(),
-            x,
+            x: status_x,
             width: status_space_available,
         });
 
@@ -840,9 +857,22 @@ impl TabBarState {
             right_status_line.remove_cell(0, SEQ_ZERO);
         }
 
-        line.append_line(right_status_line, SEQ_ZERO);
-        while line.len() < title_width {
-            line.insert_cell(x, black_cell.clone(), title_width, SEQ_ZERO);
+        if right_aligned {
+            // 先填充状态栏空隙（右对齐至按钮区左缘），再贴按钮
+            line.append_line(right_status_line.clone(), SEQ_ZERO);
+            while line.len() < buttons_x0 {
+                line.insert_cell(status_x, black_cell.clone(), title_width, SEQ_ZERO);
+            }
+        }
+        for (entry, button_line) in button_entries.into_iter().zip(button_lines) {
+            items.push(entry);
+            line.append_line(button_line, SEQ_ZERO);
+        }
+        if !right_aligned {
+            line.append_line(right_status_line, SEQ_ZERO);
+            while line.len() < title_width {
+                line.insert_cell(status_x, black_cell.clone(), title_width, SEQ_ZERO);
+            }
         }
 
         if use_integrated_title_buttons

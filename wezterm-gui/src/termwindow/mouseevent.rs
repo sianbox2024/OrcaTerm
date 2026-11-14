@@ -36,6 +36,30 @@ impl super::TermWindow {
             .cloned()
     }
 
+    /// 启动 exe 同目录的设置程序（齿轮按钮、发送指令按钮空列表引导共用）。
+    /// 可执行文件缺失（如从构建目录直接运行、未随包分发 config-ui）时记日志
+    /// 提示，而不是静默无反应。
+    pub(crate) fn spawn_config_ui(&self) {
+        let exe_name = if cfg!(windows) {
+            "orca-term-config-ui.exe"
+        } else {
+            "orca-term-config-ui"
+        };
+        if let Ok(exe) = std::env::current_exe() {
+            if let Some(dir) = exe.parent() {
+                let candidate = dir.join(exe_name);
+                if let Err(err) = std::process::Command::new(&candidate).spawn() {
+                    log::error!(
+                        "无法启动设置程序 {}：{:#}；请确认 orca-term-config-ui \
+                         与主程序位于同一目录",
+                        candidate.display(),
+                        err
+                    );
+                }
+            }
+        }
+    }
+
     fn leave_ui_item(&mut self, item: &UIItem) {
         match item.item_type {
             UIItemType::TabBar(_) => {
@@ -417,11 +441,18 @@ impl super::TermWindow {
             None => return,
         };
         let action = match button {
-            // 左键 = 复制当前 tab:同域同程序(cmd→cmd、pwsh→pwsh、SSH→再连同一 SSH)。
+            // 左键 = 弹 launch_menu(CMD/PowerShell/SSH 连接),新开什么由用户显式选择。
+            MousePress::Left => Some(KeyAssignment::ShowLauncherArgs(
+                config::keyassignment::LauncherActionArgs {
+                    flags: config::keyassignment::LauncherFlags::LAUNCH_MENU_ITEMS,
+                    ..Default::default()
+                },
+            )),
+            // 右键 = 复制当前 tab:同域同程序(cmd→cmd、pwsh→pwsh、SSH→再连同一 SSH)。
             // 域与前台进程一律取 mux 侧真实 pane——get_active_pane_or_overlay 在
             // 启动菜单等 overlay 挂着时会给出 overlay pane,其域/进程信息都不对。
             // SSH pane 没有本地前台进程(name=None),args 缺省即同域新连接。
-            MousePress::Left => {
+            MousePress::Right => {
                 let real_pane = Mux::get()
                     .get_active_tab_for_window(self.mux_window_id)
                     .and_then(|tab| tab.get_active_pane());
@@ -443,13 +474,6 @@ impl super::TermWindow {
                     )),
                 }
             }
-            // 右键 = 弹 launch_menu(CMD/PowerShell/SSH 连接),新开什么由用户显式选择。
-            MousePress::Right => Some(KeyAssignment::ShowLauncherArgs(
-                config::keyassignment::LauncherActionArgs {
-                    flags: config::keyassignment::LauncherFlags::LAUNCH_MENU_ITEMS,
-                    ..Default::default()
-                },
-            )),
             MousePress::Middle => None,
         };
 
@@ -515,29 +539,8 @@ impl super::TermWindow {
                     self.do_new_tab_button_click(MousePress::Left);
                 }
                 TabBarItem::ConfigUIButton => {
-                    let exe_name = if cfg!(windows) {
-                        "orca-term-config-ui.exe"
-                    } else {
-                        "orca-term-config-ui"
-                    };
-                    if let Ok(exe) = std::env::current_exe() {
-                        if let Some(dir) = exe.parent() {
-                            let candidate = dir.join(exe_name);
-                            match std::process::Command::new(&candidate).spawn() {
-                                Ok(_) => {}
-                                Err(err) => {
-                                    // 可执行文件缺失（如从构建目录直接运行、未随包分发
-                                    // config-ui）时提示，而不是静默无反应
-                                    log::error!(
-                                        "无法启动设置程序 {}：{:#}；请确认 orca-term-config-ui \
-                                         与主程序位于同一目录",
-                                        candidate.display(),
-                                        err
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    // 齿轮按钮：启动 exe 同目录的设置程序
+                    self.spawn_config_ui();
                 }
                 TabBarItem::CopyScreenButton => {
                     // 复制终端当前保留的全部文本（回滚+视口）到系统剪贴板
@@ -627,6 +630,13 @@ impl super::TermWindow {
                         }
                     }
                 }
+                TabBarItem::SendCommandButton => {
+                    // e6e4 云命令行按钮：弹出「发送指令列表」选择弹层
+                    //（config.tab_button_commands，Enter/左键点击选中即向
+                    // 当前终端发送该指令并补回车）；列表为空时在
+                    // show_command_sender 内转去打开设置窗体引导填写。
+                    self.show_command_sender();
+                }
                 TabBarItem::None | TabBarItem::LeftStatus | TabBarItem::RightStatus => {
                     let maximized = self
                         .window_state
@@ -684,6 +694,7 @@ impl super::TermWindow {
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
                 | TabBarItem::ClearScreenButton
+                | TabBarItem::SendCommandButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Press(MousePress::Right) => match item {
@@ -700,6 +711,7 @@ impl super::TermWindow {
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
                 | TabBarItem::ClearScreenButton
+                | TabBarItem::SendCommandButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::Move => match item {
@@ -722,6 +734,7 @@ impl super::TermWindow {
                 | TabBarItem::ConfigUIButton
                 | TabBarItem::CopyScreenButton
                 | TabBarItem::ClearScreenButton
+                | TabBarItem::SendCommandButton
                 | TabBarItem::SftpPanelButton => {}
             },
             WMEK::VertWheel(n) => {

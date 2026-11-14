@@ -13,6 +13,7 @@ use config_ui_core::load::{LoadError, config_to_json, load_from_source};
 use config_ui_core::schemes::{SchemeInfo, builtin_schemes};
 use config_ui_core::settings::{self, Kind, SettingValue, SETTINGS};
 use config_ui_core::ssh::{self, SshConnection};
+use config_ui_core::tab_commands::{self, TabButtonCommand};
 use gpui::{
     actions, div, prelude::*, px, rgb, size, uniform_list, AnyElement, App, Bounds, Context, Entity,
     Focusable, KeyBinding, KeyDownEvent, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
@@ -240,6 +241,14 @@ struct ConfigUi {
     ssh_cmd_input: Option<Entity<TextInput>>,
     //「SFTP 命令」草案:点标签栏 SFTP 按钮时对该连接执行的外部工具命令
     ssh_sftp_input: Option<Entity<TextInput>>,
+    // 组3 标签栏页「发送指令列表」（U+E6E4 弹层菜单）：结构化列表不走
+    // settings 注册表（与 ssh_conns 同一取舍），reload 时从快照解析、
+    // save 时专项发射 config.tab_button_commands
+    tab_cmds: Vec<TabButtonCommand>,
+    baseline_tab_cmds: Vec<TabButtonCommand>,
+    selected_tab_cmd: Option<usize>,
+    tab_cmd_label_input: Option<Entity<TextInput>>,
+    tab_cmd_command_input: Option<Entity<TextInput>>,
     // 外部修改检测（配置文件仍可能被外部工具改动,保护未保存的表单改动）
     external_changed: bool,
     foreground_input: Option<Entity<TextInput>>,
@@ -297,6 +306,11 @@ impl ConfigUi {
             ssh_key_input: None,
             ssh_cmd_input: None,
             ssh_sftp_input: None,
+            tab_cmds: vec![],
+            baseline_tab_cmds: vec![],
+            selected_tab_cmd: None,
+            tab_cmd_label_input: None,
+            tab_cmd_command_input: None,
             external_changed: false,
             foreground_input: None,
             background_input: None,
@@ -391,6 +405,9 @@ impl ConfigUi {
             self.ssh_key_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_cmd_input = Some(cx.new(|cx| TextInput::new("", cx)));
             self.ssh_sftp_input = Some(cx.new(|cx| TextInput::new("", cx)));
+            // 发送指令列表草案输入框：同 SSH 输入框=暂存区，点按钮才收集
+            self.tab_cmd_label_input = Some(cx.new(|cx| TextInput::new("如：清理屏幕", cx)));
+            self.tab_cmd_command_input = Some(cx.new(|cx| TextInput::new("如：clear", cx)));
 
             // 配色组：宽松校验——空串=清除覆盖，其余原样接受（含 scheme 名称与 #十六进制）
             if let Some(e) = self.color_scheme_input.clone() {
@@ -491,6 +508,8 @@ impl ConfigUi {
                 &self.ssh_key_input,
                 &self.ssh_cmd_input,
                 &self.ssh_sftp_input,
+                &self.tab_cmd_label_input,
+                &self.tab_cmd_command_input,
             ] {
                 if let Some(e) = entity.clone() {
                     observe_input(&e, cx, |_, _, cx| cx.notify());
@@ -607,6 +626,9 @@ impl ConfigUi {
         self.ssh_conns = ssh::parse_ssh_domains(&self.snapshot);
         self.baseline_ssh_conns = self.ssh_conns.clone();
         self.selected_ssh = None;
+        self.tab_cmds = tab_commands::parse_tab_button_commands(&self.snapshot);
+        self.baseline_tab_cmds = self.tab_cmds.clone();
+        self.selected_tab_cmd = None;
         // 伪设置项「标签页按颜色区分」读回：状态只体现在发射的 Lua 文本里
         //（JSON 快照无此字段）。配置里没有任何标记（全新/历史遗留）时默认**开**
         //——该功能的预期是开箱即见，用户可在标签栏页显式关闭（off 标记）。
@@ -666,6 +688,9 @@ impl ConfigUi {
             &self.ssh_conns,
             self.form.default_prog.as_deref(),
         ));
+        // 发送指令列表：非空即发射（全量重建下按「是否有变化」跳过会丢块，
+        // 同 ssh_domains 教训）；清空列表 = 不发射 = 从配置中移除该键。
+        body.push_str(&tab_commands::emit_tab_button_commands(&self.tab_cmds));
         // format-tab-title：「标签页按颜色区分」开=彩色版（激活 tab 按主题
         // ANSI 亮色六色循环着色），关=普通版。始终发射：整文件重写后回调必须
         // 仍在，且关态会自然替换掉旧的彩色标记。
@@ -906,13 +931,14 @@ impl ConfigUi {
             .when(self.selected_group == 0, |d| d.child(self.render_font_tab(cx)))
             .when(self.selected_group == 1, |d| d.child(self.render_color_tab(cx)))
             .when(self.selected_group == 2, |d| d.child(self.render_window_tab(cx)))
-            .when(self.selected_group == 3, |d| d.child(self.render_setting_rows(3, cx)))
+            .when(self.selected_group == 3, |d| d.child(self.render_tabbar_tab(cx)))
             .when(self.selected_group == 4, |d| d.child(self.render_startup_tab(cx)))
             .when(self.selected_group == 5, |d| d.child(self.render_setting_rows(5, cx)))
             .when(self.selected_group == 6, |d| d.child(self.render_setting_rows(6, cx)))
             .when(self.selected_group == 7, |d| d.child(self.render_keys_tab(cx)))
             .when(self.selected_group == 8, |d| d.child(self.render_ssh_tab(cx)))
-            .when(self.selected_group > 8, |d| d.child(div().child("未知分组")))
+            .when(self.selected_group == 9, |d| d.child(self.render_about_tab(cx)))
+            .when(self.selected_group > 9, |d| d.child(div().child("未知分组")))
     }
 
     /// 注册表通用行渲染：按 kind 自动选控件（开关/分段选择/文本输入）。
@@ -1245,6 +1271,27 @@ impl ConfigUi {
                         .child("可执行文件路径；留空跟随默认（自动探测 pwsh 7 / powershell）")),
             )
             .child(self.render_setting_rows(4, cx))
+    }
+
+    /// 「关于」页：展示主程序版本标识。主界面标签栏右端不再显示版本号，
+    /// 统一收拢到本页；格式与原标签栏常驻文本一致（Ver主.次 build<日期.序号>）。
+    /// 版本值由 config-ui/build.rs 编译期注入（ORCA_GUI_VERSION 取自
+    /// wezterm-gui/Cargo.toml，ORCA_BUILD_ID 取自 ../build-id.txt）。
+    fn render_about_tab(&mut self, _cx: &mut Context<Self>) -> impl IntoElement {
+        let pkg_ver = env!("ORCA_GUI_VERSION");
+        let pkg_ver = &pkg_ver[..pkg_ver.rfind('.').unwrap_or(pkg_ver.len())];
+        div().flex().flex_col().gap_2().p_2()
+            .child(
+                div().text_size(px(20.)).text_color(theme::fg_main()).child("orca-term"),
+            )
+            .child(
+                div().text_size(px(13.)).text_color(theme::fg_main())
+                    .child(format!("Ver{pkg_ver} build{}", env!("ORCA_BUILD_ID"))),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("基于 WezTerm (MIT)"),
+            )
     }
 }
 
@@ -1756,6 +1803,193 @@ impl ConfigUi {
         }
         self.set_input(&self.ssh_port_input, "22", cx);
         cx.notify();
+    }
+
+    // ===== 标签栏页「发送指令列表」（U+E6E4 弹层菜单条目）=====
+
+    /// 从草案输入框收集一条指令；command 为空视为无效（发送空串无意义），
+    /// 输入框只是暂存区，是否入列由调用方决定（添加=新条目，应用=写回选中）。
+    fn tab_cmd_from_editor(&self, cx: &App) -> Option<TabButtonCommand> {
+        let text = |slot: &Option<Entity<TextInput>>| {
+            slot.as_ref()
+                .map(|e| e.read(cx).content.trim().to_string())
+                .unwrap_or_default()
+        };
+        let command = text(&self.tab_cmd_command_input);
+        if command.is_empty() {
+            return None;
+        }
+        Some(TabButtonCommand {
+            label: text(&self.tab_cmd_label_input),
+            command,
+        })
+    }
+
+    fn select_tab_cmd(&mut self, i: usize, cx: &mut Context<Self>) {
+        if i >= self.tab_cmds.len() {
+            return;
+        }
+        self.selected_tab_cmd = Some(i);
+        let c = self.tab_cmds[i].clone();
+        self.set_input(&self.tab_cmd_label_input, &c.label, cx);
+        self.set_input(&self.tab_cmd_command_input, &c.command, cx);
+        cx.notify();
+    }
+
+    fn add_tab_cmd(&mut self, cx: &mut Context<Self>) {
+        // 先填后加：编辑器内容作为草案，点「添加指令」才入列
+        let Some(cmd) = self.tab_cmd_from_editor(cx) else {
+            self.error = Some("指令内容不能为空：请在「指令」框填写要发送的命令".into());
+            cx.notify();
+            return;
+        };
+        self.tab_cmds.push(cmd);
+        let i = self.tab_cmds.len() - 1;
+        self.dirty += 1;
+        self.select_tab_cmd(i, cx);
+    }
+
+    /// 编辑器草案写回选中的条目（「应用修改」按钮）。
+    fn apply_tab_cmd(&mut self, cx: &mut Context<Self>) {
+        let Some(i) = self.selected_tab_cmd else { return };
+        if i >= self.tab_cmds.len() {
+            return;
+        }
+        let Some(cmd) = self.tab_cmd_from_editor(cx) else {
+            self.error = Some("指令内容不能为空：请在「指令」框填写要发送的命令".into());
+            cx.notify();
+            return;
+        };
+        self.tab_cmds[i] = cmd;
+        self.dirty += 1;
+        self.select_tab_cmd(i, cx);
+    }
+
+    /// 清空编辑器并取消选中，回到「填写新指令」草案态。
+    fn new_tab_cmd(&mut self, cx: &mut Context<Self>) {
+        self.selected_tab_cmd = None;
+        self.set_input(&self.tab_cmd_label_input, "", cx);
+        self.set_input(&self.tab_cmd_command_input, "", cx);
+        cx.notify();
+    }
+
+    fn delete_tab_cmd(&mut self, cx: &mut Context<Self>) {
+        if let Some(i) = self.selected_tab_cmd.take() {
+            if i < self.tab_cmds.len() {
+                self.tab_cmds.remove(i);
+                self.dirty += 1;
+                self.set_input(&self.tab_cmd_label_input, "", cx);
+                self.set_input(&self.tab_cmd_command_input, "", cx);
+                cx.notify();
+            }
+        }
+    }
+
+    /// 标签栏页：顶部「发送指令列表」编辑器（U+E6E4 弹层菜单条目，草案
+    /// 模式与 SSH 连接页一致）+ 下方注册表标量行。
+    fn render_tabbar_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let cmds = self.tab_cmds.clone();
+        let selected = self.selected_tab_cmd;
+
+        let mut list = div().flex().flex_col().gap_1();
+        for (i, c) in cmds.iter().enumerate() {
+            let is_sel = selected == Some(i);
+            let entity = cx.entity();
+            let has_label = !c.label.trim().is_empty();
+            let mut row = div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .px_2()
+                .py_1()
+                .rounded_sm()
+                .cursor_pointer()
+                .when(is_sel, |d| d.bg(theme::bg_elevated()))
+                .when(!is_sel, |d| d.bg(theme::bg_panel()))
+                .on_mouse_down(
+                    MouseButton::Left,
+                    move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                        entity.update(app, |state: &mut ConfigUi, cx| state.select_tab_cmd(i, cx));
+                    },
+                );
+
+            if has_label {
+                row = row
+                    .child(
+                        div()
+                            .w(px(110.))
+                            .text_size(px(12.))
+                            .font_family("JetBrains Mono")
+                            .text_color(theme::fg_main())
+                            .child(c.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .text_size(px(11.))
+                            .text_color(theme::fg_dim())
+                            .child(c.command.clone()),
+                    );
+            } else {
+                row = row.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(12.))
+                        .font_family("JetBrains Mono")
+                        .text_color(theme::fg_main())
+                        .child(c.command.clone()),
+                );
+            }
+            list = list.child(row);
+        }
+        if cmds.is_empty() {
+            list = list.child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("尚无指令，在右侧填写后点「添加指令」。列表为空时点主界面 e6e4 按钮会直接打开本设置窗体"),
+            );
+        }
+
+        let has_sel = selected.is_some();
+        let editor = div().flex_1().min_w_0().flex().flex_col().gap_2()
+            .p_2().rounded_md().bg(theme::bg_panel())
+            .border_1().border_color(theme::border())
+            .child(
+                div().flex().items_center().gap_2()
+                    .child(lbl("显示名称"))
+                    .child(self.input(&self.tab_cmd_label_input)),
+            )
+            .child(
+                div().flex().items_center().gap_2()
+                    .child(lbl("指令"))
+                    .child(self.input(&self.tab_cmd_command_input)),
+            )
+            .child(
+                div().flex().gap_2()
+                    .child(btn("添加指令", cx.listener(|this, _: &MouseDownEvent, _, cx| this.add_tab_cmd(cx))))
+                    .when(has_sel, |d| {
+                        d.child(btn("新建", cx.listener(|this, _: &MouseDownEvent, _, cx| this.new_tab_cmd(cx))))
+                            .child(btn("应用修改", cx.listener(|this, _: &MouseDownEvent, _, cx| this.apply_tab_cmd(cx))))
+                            .child(btn("删除选中", cx.listener(|this, _: &MouseDownEvent, _, cx| this.delete_tab_cmd(cx))))
+                    }),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("点主界面标签栏右端的云命令行按钮（e6e4）弹出此列表：Enter 或左键点击条目即向当前终端发送该指令并回车执行；显示名称留空时列表显示指令本身；弹层内「/」可模糊过滤，Esc 取消。"),
+            );
+
+        div().flex().flex_col().gap_3()
+            .child(
+                div().flex().gap_3()
+                    .child(
+                        div().w(px(280.)).flex().flex_col().gap_1().p_2().rounded_md().bg(theme::bg_base())
+                            .child(div().text_size(px(12.)).text_color(theme::fg_main()).child("发送指令列表"))
+                            .child(list),
+                    )
+                    .child(editor),
+            )
+            .child(self.render_setting_rows(3, cx))
     }
 
     /// 弹出系统文件选择框选 SSH 私钥文件，结果写回私钥路径输入框。
@@ -2353,7 +2587,7 @@ mod tests {
 
 const GROUPS: &[&str] = &[
     "字体与光标", "配色", "窗口外观", "标签栏", "启动与默认行为", "终端行为", "鼠标与选择",
-    "键绑定", "SSH 连接",
+    "键绑定", "SSH 连接", "关于",
 ];
 
 impl Render for ConfigUi {

@@ -5,9 +5,9 @@ use crate::colorease::ColorEase;
 use crate::frontend::{front_end, try_front_end};
 use crate::inputmap::InputMap;
 use crate::overlay::{
-    confirm_close_pane, confirm_close_tab, confirm_close_window, confirm_quit_program, launcher,
-    start_overlay, start_overlay_pane, CopyModeParams, CopyOverlay, LauncherArgs, LauncherFlags,
-    QuickSelectOverlay,
+    command_sender, confirm_close_pane, confirm_close_tab, confirm_close_window,
+    confirm_quit_program, launcher, start_overlay, start_overlay_pane, CopyModeParams, CopyOverlay,
+    CommandSenderArgs, LauncherArgs, LauncherFlags, QuickSelectOverlay,
 };
 use crate::resize_increment_calculator::ResizeIncrementCalculator;
 use crate::scripting::guiwin::GuiWin;
@@ -2817,6 +2817,55 @@ impl TermWindow {
             })));
         })
         .detach();
+    }
+
+    /// 标签栏「发送指令」按钮（U+E6E4）：弹出 `config.tab_button_commands`
+    /// 指令选择列表（Enter/左键点击选中即向当前终端发送该指令并补回车）。
+    /// 列表为空时改为打开设置窗体，引导用户去「标签栏」页的「发送指令列表」
+    /// 编辑器填写条目（按钮常显的引导行为）。
+    fn show_command_sender(&mut self) {
+        if self.config.effective_tab_button_commands().is_empty() {
+            self.spawn_config_ui();
+            return;
+        }
+        let window = self.window.as_ref().unwrap().clone();
+
+        let mux = Mux::get();
+        let tab = match mux.get_active_tab_for_window(self.mux_window_id) {
+            Some(tab) => tab,
+            None => return,
+        };
+
+        // pane_id 必须取 mux 侧 tab 的真实活动 pane，不能用
+        // get_active_pane_or_overlay()：同 show_launcher_impl 的注释——
+        // 弹层前若还挂着上一个 overlay，记录的就是旧 overlay 的 pane id，
+        // assign_overlay 会先销毁它，用户选中时 pane 已不存在、发送被静默丢弃。
+        let real_pane = match tab.get_active_pane() {
+            Some(pane) => pane,
+            None => return,
+        };
+        let pane_id = real_pane.pane_id();
+        let tab_id = tab.tab_id();
+        let args = CommandSenderArgs {
+            pane_id,
+            title: "Send Command".to_string(),
+            help_text: "Select a command and press Enter=send  Esc=cancel  /=filter".to_string(),
+            fuzzy_help_text: "Fuzzy matching: ".to_string(),
+        };
+
+        let win = window.clone();
+        win.notify(TermWindowNotif::Apply(Box::new(move |term_window| {
+            let mux = Mux::get();
+            if let Some(tab) = mux.get_tab(tab_id) {
+                let window = window.clone();
+                let (overlay, future) = start_overlay(term_window, &tab, move |_tab_id, term| {
+                    command_sender(args, term, window)
+                });
+
+                term_window.assign_overlay(tab_id, overlay);
+                promise::spawn::spawn(future).detach();
+            }
+        })));
     }
 
     /// Returns the Prompt semantic zones

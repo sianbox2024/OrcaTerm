@@ -12,6 +12,7 @@ use crate::font::{
 use crate::frontend::FrontEndSelection;
 use crate::keyassignment::{
     KeyAssignment, KeyTable, KeyTableEntry, KeyTables, MouseEventTrigger, SpawnCommand,
+    TabButtonCommand,
 };
 use crate::keys::{Key, LeaderKey, Mouse};
 use crate::lua::make_lua_context;
@@ -522,6 +523,22 @@ pub struct Config {
     #[dynamic(default = "default_true")]
     pub show_close_tab_button_in_tabs: bool,
 
+    /// 标签栏「发送指令」按钮（U+E6E4）点击时弹出的指令列表：每项含
+    /// label（列表显示文本，留空显示 command）与 command（选中后向当前
+    /// 终端发送并自动补回车执行）。列表为空时点击按钮会打开设置窗体
+    /// 引导填写（按钮常显）。可在配置界面「标签栏」页的「发送指令列表」
+    /// 编辑器管理；Lua 侧形如
+    /// `config.tab_button_commands = { { label='..', command='..' }, .. }`。
+    #[dynamic(default)]
+    pub tab_button_commands: Vec<TabButtonCommand>,
+
+    /// 旧版单条指令配置字段（兼容项，向后兼容 `config.tab_button_command = '...'`）。
+    #[dynamic(
+        default,
+        deprecated = "this option has been replaced with `tab_button_commands` and will be removed in a future release"
+    )]
+    pub tab_button_command: String,
+
     /// If true, show_tab_index_in_tab_bar uses a zero-based index.
     /// The default is false and the tab shows a one-based index.
     #[dynamic(default)]
@@ -956,6 +973,22 @@ impl Config {
         Self::load_with_overrides(&wezterm_dynamic::Value::default())
     }
 
+    /// 标签栏「发送指令」按钮实际消费的条目列表。若新版 `tab_button_commands` 为空，
+    /// 但配置了旧版非空的 `tab_button_command`，则自动将其包装为一条指令条目，
+    /// 保证旧配置文件平滑升级无感知。
+    pub fn effective_tab_button_commands(&self) -> Vec<TabButtonCommand> {
+        if !self.tab_button_commands.is_empty() {
+            self.tab_button_commands.clone()
+        } else if !self.tab_button_command.trim().is_empty() {
+            vec![TabButtonCommand {
+                label: String::new(),
+                command: self.tab_button_command.clone(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
     /// It is relatively expensive to parse all the ssh config files,
     /// so we defer producing the default list until someone explicitly
     /// asks for it
@@ -1114,7 +1147,7 @@ config.color_scheme = 'Aardvark Blue'
 -- 右键智能复制/粘贴：有选中 -> 复制，无选中 -> 粘贴（只粘贴不回车）
 %SMART_RIGHT_CLICK%
 
--- 右键点击标签栏加号的启动菜单（elevate 项经 UAC 提权，另开独立窗口）
+-- 左键点击标签栏加号的启动菜单（elevate 项经 UAC 提权，另开独立窗口；右键点击加号复制当前标签页）
 config.launch_menu = {
   -- 未提权的两项钉死 domain='DefaultDomain'（本机域）：不写 domain 时取
   -- CurrentPaneDomain，在 SSH 标签里选菜单项会把 Windows 可执行文件路径

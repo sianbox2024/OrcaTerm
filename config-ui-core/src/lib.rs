@@ -8,3 +8,4 @@ pub mod load;
 pub mod schemes;
 pub mod settings;
 pub mod ssh;
+pub mod tab_commands;

@@ -4,7 +4,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, ClipboardItem, Context, CursorStyle, ElementInputHandler, Entity,
+    App, Bounds, ClipboardItem, ContentMask, Context, CursorStyle, ElementInputHandler, Entity,
     EntityInputHandler, FocusHandle, Focusable, KeyBinding, MouseButton, MouseDownEvent,
     MouseMoveEvent, MouseUpEvent, PaintQuad, Pixels, Point, ShapedLine, SharedString, Style,
     TextRun, UTF16Selection, Window, actions, div, point, prelude::*, px, relative, size,
@@ -63,6 +63,11 @@ pub struct TextInput {
     is_selecting: bool,
     /// 禁用态：true 时不挂焦点/鼠标/键盘监听，纯展示不可交互。
     disabled: bool,
+    /// 横向滚动偏移：单行内容超宽时按光标位置自动平移（prepaint 计算、paint
+    /// 持久化），文本/光标/选区始终裁剪在输入框内且光标可见。命中测试与
+    /// IME 定位（index_for_mouse_position/bounds_for_range/
+    /// character_index_for_point）必须同加此偏移，否则点击落点错位。
+    scroll_x: Pixels,
 }
 
 impl TextInput {
@@ -79,6 +84,7 @@ impl TextInput {
             display_map: None,
             is_selecting: false,
             disabled: false,
+            scroll_x: px(0.),
         }
     }
 
@@ -245,7 +251,9 @@ impl TextInput {
         if position.y > bounds.bottom() {
             return self.content.len();
         }
-        let display_idx = line.closest_index_for_x(position.x - bounds.left());
+        // 与绘制侧同源：减去 last_bounds 左缘后须加回横向滚动偏移
+        let display_idx =
+            line.closest_index_for_x(position.x - bounds.left() + self.scroll_x);
         display_to_content(self.display_map.as_deref(), display_idx)
     }
 
@@ -463,11 +471,13 @@ impl EntityInputHandler for TextInput {
         let map = self.display_map.as_deref();
         Some(Bounds::from_corners(
             point(
-                bounds.left() + last_layout.x_for_index(content_to_display(map, range.start)),
+                bounds.left() + last_layout.x_for_index(content_to_display(map, range.start))
+                    - self.scroll_x,
                 bounds.top(),
             ),
             point(
-                bounds.left() + last_layout.x_for_index(content_to_display(map, range.end)),
+                bounds.left() + last_layout.x_for_index(content_to_display(map, range.end))
+                    - self.scroll_x,
                 bounds.bottom(),
             ),
         ))
@@ -481,7 +491,8 @@ impl EntityInputHandler for TextInput {
     ) -> Option<usize> {
         let line_point = self.last_bounds?.localize(&point)?;
         let last_layout = self.last_layout.as_ref()?;
-        let utf8_index = last_layout.index_for_x(point.x - line_point.x)?;
+        // 与绘制侧同源：加回横向滚动偏移后再反查字节序号
+        let utf8_index = last_layout.index_for_x(point.x - line_point.x + self.scroll_x)?;
         let utf8_index = display_to_content(self.display_map.as_deref(), utf8_index);
         Some(self.offset_to_utf16(utf8_index))
     }
@@ -496,6 +507,7 @@ pub struct PrepaintState {
     cursor: Option<PaintQuad>,
     selection: Option<PaintQuad>,
     display_map: Option<Rc<[usize]>>,
+    scroll_x: Pixels,
 }
 
 impl IntoElement for TextElement {
@@ -568,12 +580,33 @@ impl gpui::Element for TextElement {
             .shape_line(display_text, font_size, &[run], None);
 
         let cursor_pos = line.x_for_index(content_to_display(display_map.as_deref(), cursor));
+
+        // 横向自动滚动：先把既有偏移钳制到合法范围（内容变短后自愈回 0），
+        // 再保证光标（选区活动端）始终落在可视区内。文本绘制原点与下方
+        // 光标/选区矩形的构造均基于该偏移，paint 阶段统一裁剪在元素 bounds 内。
+        let mut scroll_x = input.scroll_x;
+        let visible = bounds.size.width;
+        let max_scroll = if line.width > visible {
+            line.width - visible
+        } else {
+            px(0.)
+        };
+        if scroll_x > max_scroll {
+            scroll_x = max_scroll;
+        }
+        if cursor_pos > scroll_x + visible {
+            scroll_x = cursor_pos - visible;
+        }
+        if cursor_pos < scroll_x {
+            scroll_x = cursor_pos;
+        }
+
         let (selection, cursor) = if selected_range.is_empty() {
             (
                 None,
                 Some(gpui::fill(
                     Bounds::new(
-                        point(bounds.left() + cursor_pos, bounds.top()),
+                        point(bounds.left() + cursor_pos - scroll_x, bounds.top()),
                         size(px(2.), bounds.bottom() - bounds.top()),
                     ),
                     theme::accent(),
@@ -588,7 +621,8 @@ impl gpui::Element for TextElement {
                                 + line.x_for_index(content_to_display(
                                     display_map.as_deref(),
                                     selected_range.start,
-                                )),
+                                ))
+                                - scroll_x,
                             bounds.top(),
                         ),
                         point(
@@ -596,7 +630,8 @@ impl gpui::Element for TextElement {
                                 + line.x_for_index(content_to_display(
                                     display_map.as_deref(),
                                     selected_range.end,
-                                )),
+                                ))
+                                - scroll_x,
                             bounds.bottom(),
                         ),
                     ),
@@ -610,6 +645,7 @@ impl gpui::Element for TextElement {
             cursor,
             selection,
             display_map,
+            scroll_x,
         }
     }
 
@@ -633,30 +669,37 @@ impl gpui::Element for TextElement {
                 cx,
             );
         }
-        if let Some(selection) = prepaint.selection.take() {
-            window.paint_quad(selection)
-        }
-        let line = prepaint.line.take().unwrap();
-        line.paint(
-            bounds.origin,
-            window.line_height(),
-            gpui::TextAlign::Left,
-            None,
-            window,
-            cx,
-        )
-        .unwrap();
+        // 横向滚动偏移（prepaint 阶段按光标位置算出），文本/光标/选区整体
+        // 左移该偏移并用内容掩码裁剪在输入框内，超宽文本不再画出边框
+        let scroll_x = prepaint.scroll_x;
+        let painted_line = window.with_content_mask(Some(ContentMask { bounds }), |window| {
+            if let Some(selection) = prepaint.selection.take() {
+                window.paint_quad(selection)
+            }
+            let line = prepaint.line.take().unwrap();
+            line.paint(
+                point(bounds.left() - scroll_x, bounds.top()),
+                window.line_height(),
+                gpui::TextAlign::Left,
+                None,
+                window,
+                cx,
+            )
+            .unwrap();
 
-        if !disabled && focus_handle.is_focused(window)
-            && let Some(cursor) = prepaint.cursor.take()
-        {
-            window.paint_quad(cursor);
-        }
+            if !disabled && focus_handle.is_focused(window)
+                && let Some(cursor) = prepaint.cursor.take()
+            {
+                window.paint_quad(cursor);
+            }
+            line
+        });
 
         self.input.update(cx, |input, _cx| {
-            input.last_layout = Some(line);
+            input.last_layout = Some(painted_line);
             input.last_bounds = Some(bounds);
             input.display_map = prepaint.display_map.take();
+            input.scroll_x = scroll_x;
         });
     }
 }
