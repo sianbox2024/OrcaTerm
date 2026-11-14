@@ -160,6 +160,10 @@ fn main() {
     // 后台线程接收第二实例的跳页请求：读一行 "page N"（对端写完即断开），
     // 经 smol channel 桥接进 UI（与 start_file_watcher 同一范式）。
     let (page_tx, page_rx) = smol::channel::unbounded::<usize>();
+    // 冷启动直达页：bind 成功＝首实例，CLI 的 --page=N 经同一通道注入
+    //（此前 Ok 分支丢弃 cli_page，冷启动引导落错页——金鱼盲审 P1）。
+    // 无参数时为 0＝首页，行为不变。
+    let _ = page_tx.try_send(cli_page);
     std::thread::spawn(move || {
         use std::io::Read as _;
         for stream in single_instance.incoming() {

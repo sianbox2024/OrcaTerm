@@ -228,7 +228,10 @@ impl CommandSenderState {
     }
 
     fn move_down(&mut self) {
-        self.active_idx = (self.active_idx + 1).min(self.filtered_entries.len() - 1);
+        // 空列表（如全部条目被空 command 过滤后弹层即空）时防下溢：
+        // debug 构建按 ↓/j 曾 panic，release 回绕导致高亮越界（金鱼盲审 P2）。
+        self.active_idx = (self.active_idx + 1)
+            .min(self.filtered_entries.len().saturating_sub(1));
         if self.active_idx > self.top_row + self.max_items {
             self.top_row = self.active_idx.saturating_sub(self.max_items);
         }
