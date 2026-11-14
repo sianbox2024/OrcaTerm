@@ -37,9 +37,11 @@ impl super::TermWindow {
     }
 
     /// 启动 exe 同目录的设置程序（齿轮按钮、发送指令按钮空列表引导共用）。
+    /// `page` 为设置窗体启动后落地的左侧分组下标（3＝标签栏页），经
+    /// `--page=N` 传递；若设置程序已在运行，由其单实例唤起链路切换分组。
     /// 可执行文件缺失（如从构建目录直接运行、未随包分发 config-ui）时记日志
     /// 提示，而不是静默无反应。
-    pub(crate) fn spawn_config_ui(&self) {
+    pub(crate) fn spawn_config_ui(&self, page: usize) {
         let exe_name = if cfg!(windows) {
             "orca-term-config-ui.exe"
         } else {
@@ -48,7 +50,10 @@ impl super::TermWindow {
         if let Ok(exe) = std::env::current_exe() {
             if let Some(dir) = exe.parent() {
                 let candidate = dir.join(exe_name);
-                if let Err(err) = std::process::Command::new(&candidate).spawn() {
+                if let Err(err) = std::process::Command::new(&candidate)
+                    .arg(format!("--page={page}"))
+                    .spawn()
+                {
                     log::error!(
                         "无法启动设置程序 {}：{:#}；请确认 orca-term-config-ui \
                          与主程序位于同一目录",
@@ -539,8 +544,8 @@ impl super::TermWindow {
                     self.do_new_tab_button_click(MousePress::Left);
                 }
                 TabBarItem::ConfigUIButton => {
-                    // 齿轮按钮：启动 exe 同目录的设置程序
-                    self.spawn_config_ui();
+                    // 齿轮按钮：启动 exe 同目录的设置程序（首页「字体与光标」）
+                    self.spawn_config_ui(0);
                 }
                 TabBarItem::CopyScreenButton => {
                     // 复制终端当前保留的全部文本（回滚+视口）到系统剪贴板

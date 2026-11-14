@@ -2821,11 +2821,12 @@ impl TermWindow {
 
     /// 标签栏「发送指令」按钮（U+E6E4）：弹出 `config.tab_button_commands`
     /// 指令选择列表（Enter/左键点击选中即向当前终端发送该指令并补回车）。
-    /// 列表为空时改为打开设置窗体，引导用户去「标签栏」页的「发送指令列表」
-    /// 编辑器填写条目（按钮常显的引导行为）。
+    /// 列表为空时改为打开设置窗体并直接落到「标签栏」页（--page=3，单实例
+    /// 唤起链路对已运行的设置程序同样生效），引导填写条目（按钮常显的引导
+    /// 行为）。
     fn show_command_sender(&mut self) {
         if self.config.effective_tab_button_commands().is_empty() {
-            self.spawn_config_ui();
+            self.spawn_config_ui(3);
             return;
         }
         let window = self.window.as_ref().unwrap().clone();

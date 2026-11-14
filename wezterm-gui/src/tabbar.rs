@@ -110,7 +110,8 @@ fn call_format_tab_title(
                     let line = parse_status_text(&esc, CellAttributes::default());
 
                     let (items, len) = if line.len() == 0 {
-                        (vec![FormatItem::Text("终端".to_string())], 2)
+                        // 「终端」两个 CJK 字实占 4 格，len 按实际占格计数
+                        (vec![FormatItem::Text("终端".to_string())], 4)
                     } else {
                         (items, line.len())
                     };

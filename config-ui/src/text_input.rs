@@ -179,7 +179,11 @@ impl TextInput {
 
     fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(text) = cx.read_from_clipboard().and_then(|item| item.text()) {
-            self.replace_text_in_range(None, &text.replace("\n", " "), window, cx);
+            // CRLF 粘贴净化：Windows 行尾 \r\n 折叠为单个空格，孤立 \r/\n 同样收敛。
+            // 残留裸 \r 会进入发射的 Lua 引号串触发 lexer "unfinished string"，
+            // 整份 orca-config.lua 加载失败（保存前无回读校验兜底）。
+            let sanitized = text.replace("\r\n", " ").replace(['\r', '\n'], " ");
+            self.replace_text_in_range(None, &sanitized, window, cx);
         }
     }
 

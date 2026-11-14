@@ -593,6 +593,10 @@ mod tests {
         }
     }
 
+    // 仅 Windows 可测：resolve_pwsh 的 default_prog 兜底分支在 #[cfg(windows)]
+    // 块内，非 Windows 编译恒返 None，本测试必然失败（预存在平台门控缺失，
+    // 金鱼盲审 ESCALATE 项，经 plan_001 步骤四收口）。
+    #[cfg(windows)]
     #[test]
     fn pwsh_default_prog_forces_pwsh_menu_even_on_green_install() {
         // 绿色版 pwsh（不在 PATH/ProgramFiles）兜底层：配置快照 default_prog

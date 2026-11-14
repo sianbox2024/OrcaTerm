@@ -40,6 +40,9 @@ struct Entry {
 
 fn build_entries(cmds: &[TabButtonCommand]) -> Vec<Entry> {
     cmds.iter()
+        // 手写 Lua 可能给出无 command 条目：发送裸 \r 无意义，消费端过滤
+        //（config-ui 编辑器侧已在保存前拦截，此处兜底手写配置）
+        .filter(|item| !item.command.trim().is_empty())
         .map(|item| {
             let label = if item.label.trim().is_empty() {
                 item.command.clone()
@@ -416,4 +419,50 @@ pub fn command_sender(
     state.update_filter();
     state.render(&mut term)?;
     state.run_loop(&mut term)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 手写 Lua 配置可能给出无 command 条目（如 `{ label='x' }`）：
+    /// 消费端必须过滤，否则弹层渲染空行、Enter 发送裸 `\r`
+    /// （金鱼盲审条件四；config-ui 编辑器侧已在 main.rs:1817 拦截）。
+    #[test]
+    fn build_entries_filters_empty_command() {
+        let cmds = vec![
+            TabButtonCommand {
+                label: "清理".into(),
+                command: "clear".into(),
+            },
+            TabButtonCommand {
+                label: "空指令".into(),
+                command: String::new(),
+            },
+            TabButtonCommand {
+                label: "空白指令".into(),
+                command: "   ".into(),
+            },
+            TabButtonCommand {
+                label: String::new(),
+                command: "htop".into(),
+            },
+        ];
+        let entries = build_entries(&cmds);
+        assert_eq!(entries.len(), 2, "空/空白 command 条目应被过滤");
+        assert_eq!(entries[0].label, "清理");
+        assert_eq!(entries[0].command, "clear");
+        // label 留空回退显示 command
+        assert_eq!(entries[1].label, "htop");
+        assert_eq!(entries[1].command, "htop");
+    }
+
+    #[test]
+    fn build_entries_all_empty_command_yields_empty() {
+        let cmds = vec![TabButtonCommand {
+            label: "只有名字".into(),
+            command: String::new(),
+        }];
+        assert!(build_entries(&cmds).is_empty());
+    }
 }

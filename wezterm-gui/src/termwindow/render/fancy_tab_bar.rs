@@ -853,8 +853,13 @@ pub fn compute_tab_width(
         return 0.0;
     }
     let ideal_tab_width = available_tab_area / num_tabs as f32;
-    let max_tab_px = (tab_max_width_cells as f32 * cell_w + 32.0).clamp(180.0, 240.0);
-    let min_tab_px = 36.0;
+    // 36/180/240/32 为 96 DPI、9px 基准 cell 宽下的设计值，按实际 cell 宽
+    // 等比缩放：高 DPI 下上限/保底折合逻辑像素不漂移（金鱼盲审条件三）。
+    // cell_w=9 时 scale=1，行为与历史版本逐像素一致。
+    let scale = cell_w / 9.0;
+    let max_tab_px = (tab_max_width_cells as f32 * cell_w + 32.0 * scale)
+        .clamp(180.0 * scale, 240.0 * scale);
+    let min_tab_px = 36.0 * scale;
     ideal_tab_width.clamp(min_tab_px, max_tab_px)
 }
 
@@ -894,5 +899,18 @@ mod tests {
         let max_cells = 16;
         let w30 = compute_tab_width(available, 30, max_cells, cell_w);
         assert_eq!(w30, 36.0);
+    }
+
+    #[test]
+    fn test_compute_tab_width_scales_with_cell_width() {
+        // 高 DPI（cell_w=18，200%）：全部物理像素常数等比翻倍，
+        // 折合逻辑像素与 96 DPI 基准一致（金鱼盲审条件三）
+        let available = 865.5;
+        let max_cells = 16;
+        let w1 = compute_tab_width(available, 1, max_cells, 18.0);
+        assert_eq!(w1, 360.0, "上限 clamp 应随 cell 宽翻倍（180→360px）");
+        let w30 = compute_tab_width(available, 30, max_cells, 18.0);
+        assert_eq!(w30, 72.0, "保底宽应随 cell 宽翻倍（36→72px）");
+        // 逻辑语义不变：360/2=180px、72/2=36px
     }
 }

@@ -118,11 +118,17 @@ enum SliderDrag {
 }
 
 fn main() {
-    // ponytail: 单实例用本地端口占位检测，聚焦既有窗口需 IPC，后续再补
-    let single_instance = std::net::TcpListener::bind(("127.0.0.1", 43117));
-    if single_instance.is_err() {
-        return;
-    }
+    // 单实例守卫 + 跳页唤起（金鱼盲审条件二，人类已拍板修实现）：端口占用 =
+    // 已有实例运行，把 `--page=N` 目标页发给它后退出；首实例持有监听器，
+    // 由 ConfigUi 的后台线程收页码并切换左侧分组。
+    let cli_page = parse_cli_page();
+    let single_instance = match std::net::TcpListener::bind(("127.0.0.1", 43117)) {
+        Ok(listener) => listener,
+        Err(_) => {
+            notify_running_instance(cli_page);
+            return;
+        }
+    };
 
     // GUI 唯一读写目标：exe 同目录的 orca-config.lua。
     // 永不触碰用户 HOME 下的 .wezterm.lua；首次启动在此处写一份 wezterm 默认 config，
@@ -151,7 +157,28 @@ fn main() {
         }
     }
 
-    let _keep = single_instance.ok();
+    // 后台线程接收第二实例的跳页请求：读一行 "page N"（对端写完即断开），
+    // 经 smol channel 桥接进 UI（与 start_file_watcher 同一范式）。
+    let (page_tx, page_rx) = smol::channel::unbounded::<usize>();
+    std::thread::spawn(move || {
+        use std::io::Read as _;
+        for stream in single_instance.incoming() {
+            let mut stream = match stream {
+                Ok(s) => s,
+                Err(_) => continue,
+            };
+            // 读超时防杂散连接挂住 accept 循环：正常对端写完即断开，
+            // 超时按无跳页请求丢弃本次连接。
+            let _ = stream.set_read_timeout(Some(std::time::Duration::from_secs(2)));
+            let mut buf = String::new();
+            if stream.read_to_string(&mut buf).is_ok()
+                && let Some(rest) = buf.trim().strip_prefix("page ")
+                && let Ok(page) = rest.trim().parse::<usize>()
+            {
+                let _ = page_tx.try_send(page);
+            }
+        }
+    });
     let _ = gpui_platform::application().run(|cx: &mut App| {
         bind_input_keys(cx);
         cx.bind_keys([
@@ -181,11 +208,35 @@ fn main() {
                 if let Some(rgba) = icon_image.as_ref() {
                     set_window_icon(window, rgba);
                 }
-                cx.new(|cx| ConfigUi::new(config_path, cx))
+                cx.new(|cx| ConfigUi::new(config_path, page_rx, cx))
             },
         )
         .unwrap();
     });
+}
+
+/// 解析 `--page=N` / `--page N` 启动参数：缺省 0＝首页「字体与光标」；
+/// 非法值一律回退 0（不因坏参数拒绝启动）。
+fn parse_cli_page() -> usize {
+    let mut args = std::env::args().skip(1);
+    while let Some(arg) = args.next() {
+        if let Some(v) = arg.strip_prefix("--page=") {
+            return v.parse().unwrap_or(0);
+        }
+        if arg == "--page" {
+            return args.next().and_then(|v| v.parse().ok()).unwrap_or(0);
+        }
+    }
+    0
+}
+
+/// 已有实例在运行：把目标页码发给它（由其后台线程切换分组）后退出。
+/// 发送端写完立即断开，接收端按 EOF 结束本次读取。
+fn notify_running_instance(page: usize) {
+    if let Ok(mut stream) = std::net::TcpStream::connect(("127.0.0.1", 43117)) {
+        use std::io::Write as _;
+        let _ = stream.write_all(format!("page {page}\n").as_bytes());
+    }
 }
 
 struct ConfigUi {
@@ -262,7 +313,7 @@ struct ConfigUi {
 }
 
 impl ConfigUi {
-    fn new(path: PathBuf, cx: &mut Context<Self>) -> Self {
+    fn new(path: PathBuf, page_rx: smol::channel::Receiver<usize>, cx: &mut Context<Self>) -> Self {
         // 基线 = wezterm 出厂默认；只有与默认不同的字段会被写回文件，避免每次都把全表 dump 出来
         let baseline = load_default_snapshot();
         let form = FormState::from_snapshot(&baseline, &baseline);
@@ -323,6 +374,7 @@ impl ConfigUi {
         };
         s.reload_from_disk(cx);
         s.start_file_watcher(cx);
+        s.start_page_listener(page_rx, cx);
         s
     }
 
@@ -368,6 +420,28 @@ impl ConfigUi {
                     s.external_changed = true;
                 } else {
                     s.reload_from_disk(cx);
+                }
+                cx.notify();
+            });
+            if ok.is_err() {
+                break;
+            }
+        })
+        .detach();
+    }
+
+    /// 接收第二实例的「跳页」请求（单实例唤起，金鱼盲审条件二）：与
+    /// start_file_watcher 同一 smol channel + cx.spawn 桥接范式，收到合法
+    /// 页码即切换左侧分组（如主程序空列表引导发出的 3＝标签栏页）。
+    fn start_page_listener(&mut self, rx: smol::channel::Receiver<usize>, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| loop {
+            let page = match rx.recv().await {
+                Ok(page) => page,
+                Err(_) => break,
+            };
+            let ok = this.update(cx, |s, cx| {
+                if page < GROUPS.len() {
+                    s.selected_group = page;
                 }
                 cx.notify();
             });
@@ -701,6 +775,14 @@ impl ConfigUi {
         let text = format!(
             "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n\n{body}return config\n"
         );
+        // 保存前真实加载链回读校验（兜底防线）：任何发射块产生非法 Lua 都会
+        // 让主程序整份配置加载失败——「保存成功但终端报错比保存失败更坑」，
+        // 与上方颜色字段同标准。失败即中止写盘。
+        if let Err(e) = load_from_source(&text, &path) {
+            self.error = Some(format!("配置校验失败，已取消保存：{}", fmt_load_error(&e)));
+            cx.notify();
+            return;
+        }
         match std::fs::write(&path, text.as_bytes()) {
             Ok(_) => {
                 self.file_text = text;

@@ -398,8 +398,17 @@ fn list_of(v: Option<&Value>) -> Vec<String> {
 }
 
 /// 单引号 Lua 字符串字面量：先转义反斜杠再转义引号，避免路径 `\U`、`\n` 变成非法转义。
+/// `\r`/`\n` 控制字符同样转义：裸控制字符在单引号串内触发 lexer "unfinished
+/// string"，整份配置加载失败（Windows 文档复制的 CRLF 是最高频入口）。
+/// 控制符转义须放在反斜杠转义之后，避免新引入的 `\` 被二次转义。
 pub fn lua_quote(v: &str) -> String {
-    format!("'{}'", v.replace('\\', "\\\\").replace('\'', "\\'"))
+    format!(
+        "'{}'",
+        v.replace('\\', "\\\\")
+            .replace('\'', "\\'")
+            .replace('\r', "\\r")
+            .replace('\n', "\\n")
+    )
 }
 
 impl SettingsForm {

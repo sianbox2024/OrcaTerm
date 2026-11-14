@@ -742,7 +742,12 @@ impl super::TermWindow {
                     computed_kids.push(kid);
                 }
 
-                // Respect min-width
+                // Respect min-width。注意隐式耦合：min_width 抬高后的 max_x
+                // 会被下面的 float_max_x 继承——fancy 标签栏正是靠把标签
+                // min_width 拉伸到 compute_tab_width 的目标宽，让右浮动的
+                // 按钮组贴到末标签右缘（消除 Issue/1.png 空白死区）；
+                // 若 min_width 只约束自身绘制而不抬高 max_x，按钮组会浮在
+                // 内容实际右缘，留下大片空白。
                 max_x = max_x.max(min_width);
 
                 let mut float_max_x = (max_x + float_width).min(max_width);

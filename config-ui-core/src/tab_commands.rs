@@ -176,6 +176,26 @@ mod tests {
         assert_eq!(parsed, cmds);
     }
 
+    /// CRLF 经 lua_quote 转义后必须能过真实加载链原样读回：裸 \r/\n 在
+    /// Lua 单引号串内触发 lexer "unfinished string"，整份配置损坏
+    /// （金鱼盲审条件一，Windows 文档复制是本功能最典型输入路径）。
+    #[test]
+    fn emit_escapes_crlf_and_roundtrips() {
+        let cmds = vec![TabButtonCommand {
+            label: "多行\r\n指令".into(),
+            command: "echo a\r\nb".into(),
+        }];
+        let body = emit_tab_button_commands(&cmds);
+        let source = format!(
+            "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n{}return config\n",
+            body
+        );
+        let loaded = crate::load::load_from_source(&source, Path::new("tabcmd-crlf-test.lua"))
+            .expect("CRLF 转义后配置应可加载");
+        let parsed = parse_tab_button_commands(&crate::load::config_to_json(&loaded.config));
+        assert_eq!(parsed, cmds);
+    }
+
     #[test]
     fn emit_empty_list_is_empty_string() {
         assert_eq!(emit_tab_button_commands(&[]), "");
