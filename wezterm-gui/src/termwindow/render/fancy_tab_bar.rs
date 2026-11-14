@@ -120,6 +120,9 @@ impl crate::TermWindow {
         let mut left_status = vec![];
         let mut left_eles = vec![];
         let mut right_eles = vec![];
+        // 新标签（+）按钮单独收集：有标签时紧随最后一个标签入左列，
+        // 零标签空窗口时回归右侧按钮组首位（见下方分流注释）
+        let mut new_tab_eles = vec![];
         let bar_colors = ElementColors {
             border: BorderColor::default(),
             bg: if self.focused.is_some() {
@@ -593,7 +596,11 @@ impl crate::TermWindow {
                     };
                     left_eles.push(elem);
                 }
-                // 其余变体即按钮组（新标签/齿轮/复制/SFTP/清屏/发送指令）：
+                // 新标签（+）按钮：有标签时跟随最后一个标签（符合「新建标签」
+                // 操作习惯，参照 Windows Terminal/浏览器），零标签空窗口时
+                // 回归右侧按钮组首位，避免孤悬最左缘
+                TabBarItem::NewTabButton => new_tab_eles.push(item_to_elem(item)),
+                // 其余变体即按钮组（齿轮/复制/SFTP/清屏/发送指令）：
                 // 全部 push 进右侧浮动容器实现右对齐，push 顺序即屏幕上从左到右
                 _ => right_eles.push(item_to_elem(item)),
             }
@@ -626,7 +633,33 @@ impl crate::TermWindow {
             zindex: 10,
         };
 
-        // 精确测量右侧按钮组（+/齿轮/复制/SFTP/清屏/发送指令/窗口按钮）的实际像素宽度
+        // + 按钮分流：有标签时并入左列尾部（紧随最后一个标签），零标签
+        // 空窗口时插回右侧按钮组首位——无「最后一个标签」可依托，保持
+        // 历史位置避免孤悬最左缘
+        let num_tabs = left_eles
+            .iter()
+            .filter(|e| matches!(e.item_type, Some(UIItemType::TabBar(TabBarItem::Tab { .. }))))
+            .count();
+        let new_tab_follows_tabs = num_tabs > 0 && !new_tab_eles.is_empty();
+        // 跟随标签流时先精确测量 + 按钮宽度（含 margin/padding/边框），
+        // 供下方标签区间预留
+        let new_tab_width = if new_tab_follows_tabs {
+            let plus_probe =
+                Element::new(&font, ElementContent::Children(new_tab_eles.clone()))
+                    .colors(bar_colors.clone());
+            self.compute_element(&layout_context, &plus_probe)?
+                .bounds
+                .width()
+        } else {
+            0.0
+        };
+        if new_tab_follows_tabs {
+            left_eles.append(&mut new_tab_eles);
+        } else {
+            right_eles.splice(0..0, new_tab_eles.drain(..));
+        }
+
+        // 精确测量右侧按钮组（齿轮/复制/SFTP/清屏/发送指令/窗口按钮；零标签时含 +）的实际像素宽度
         let right_width = if right_eles.is_empty() {
             0.0
         } else {
@@ -680,17 +713,15 @@ impl crate::TermWindow {
         let left_padding_px = left_padding.evaluate_as_pixels(layout_context.width);
 
         // 标签可用总像素区间：从左侧 padding / 状态文本之后，一直延伸到右侧按钮组左缘。
-        // 彻底消除标签与右侧按钮组之间的空白死区（Issue/1.png 红框区域）。
+        // + 按钮已随标签流时其自身宽度同样预留——标签填满区间时 + 恰好补位在
+        // 最后一个标签与按钮组之间。彻底消除标签与右侧按钮组之间的空白死区
+        // （Issue/1.png 红框区域）。
         let available_tab_area = (total_bar_width
             - right_width
+            - new_tab_width
             - left_padding_px
             - left_status_width)
             .max(0.0);
-
-        let num_tabs = left_eles
-            .iter()
-            .filter(|e| matches!(e.item_type, Some(UIItemType::TabBar(TabBarItem::Tab { .. }))))
-            .count();
 
         if num_tabs > 0 {
             let cell_w = metrics.cell_size.width as f32;
