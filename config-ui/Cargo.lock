@@ -861,6 +861,7 @@ dependencies = [
  "anyhow",
  "config",
  "mlua",
+ "serde",
  "serde_json",
  "smol",
  "wezterm-dynamic",

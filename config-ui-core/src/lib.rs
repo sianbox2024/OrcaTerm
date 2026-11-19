@@ -5,6 +5,7 @@ pub mod backup;
 pub mod form;
 pub mod keybinds;
 pub mod load;
+pub mod scheme_prefs;
 pub mod schemes;
 pub mod settings;
 pub mod ssh;

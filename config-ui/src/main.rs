@@ -10,7 +10,8 @@ use std::ptr::null_mut;
 use config_ui_core::form::FormState;
 use config_ui_core::keybinds::{self, Binding};
 use config_ui_core::load::{LoadError, config_to_json, load_from_source};
-use config_ui_core::schemes::{SchemeInfo, builtin_schemes};
+use config_ui_core::scheme_prefs::{SchemePrefs, default_state_path};
+use config_ui_core::schemes::{SchemeInfo, builtin_schemes, curated_schemes};
 use config_ui_core::settings::{self, Kind, SettingValue, SETTINGS};
 use config_ui_core::ssh::{self, SshConnection};
 use config_ui_core::tab_commands::{self, TabButtonCommand};
@@ -265,7 +266,12 @@ struct ConfigUi {
     color_scheme_input: Option<Entity<TextInput>>,
     scheme_search: Option<Entity<TextInput>>,
     scheme_filter: String,
+    /// 精选方案（按精选目录顺序），默认展示
     schemes: Vec<SchemeInfo>,
+    /// 全部内置方案（1001 个），非空搜索时按原名匹配
+    all_schemes: Vec<SchemeInfo>,
+    /// 收藏 + 最近使用状态（exe 同目录 orca-ui-state.json）
+    scheme_prefs: SchemePrefs,
     // 组6 键绑定
     bindings: Vec<Binding>,
     key_search: Option<Entity<TextInput>>,
@@ -339,7 +345,11 @@ impl ConfigUi {
             color_scheme_input: None,
             scheme_search: None,
             scheme_filter: String::new(),
-            schemes: builtin_schemes(),
+            schemes: curated_schemes(),
+            all_schemes: builtin_schemes(),
+            scheme_prefs: default_state_path()
+                .map(|p| SchemePrefs::load(&p))
+                .unwrap_or_default(),
             bindings: vec![],
             key_search: None,
             key_filter: String::new(),
@@ -1228,20 +1238,53 @@ impl ConfigUi {
             }
         }
         self.set_input(&self.color_scheme_input, name, cx);
+        // 每次真正选中都记入「最近使用」，并按最近在前排序；不改配置文件。
+        self.scheme_prefs.touch(name);
+        self.persist_scheme_prefs();
         self.dirty += 1;
         cx.notify();
     }
 
+    /// 切换收藏标记。纯 UI 状态，不触发 dirty，也不写 orca-config.lua。
+    fn toggle_scheme_favorite(&mut self, name: &str, cx: &mut Context<Self>) {
+        self.scheme_prefs.toggle_favorite(name);
+        self.persist_scheme_prefs();
+        cx.notify();
+    }
+
+    /// 保存偏好到 exe 同目录；失败时静默忽略（UI 状态不应阻断配置编辑）。
+    fn persist_scheme_prefs(&self) {
+        if let Some(path) = default_state_path() {
+            let _ = self.scheme_prefs.save(&path);
+        }
+    }
+
     fn render_color_tab(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let q = self.scheme_filter.clone();
-        // ponytail: 每帧克隆过滤后的方案列表（数百项小字符串），交互频率低可接受；卡顿再改索引引用
-        let list: Vec<SchemeInfo> = self
-            .schemes
-            .iter()
-            .filter(|s| q.is_empty() || s.name.to_lowercase().contains(&q))
-            .cloned()
-            .collect();
+        let searching = !q.is_empty();
         let selected = self.form.color_scheme.clone();
+        let prefs = self.scheme_prefs.clone();
+        // 搜索跨全部内置方案（含各种变体）；平时只展示精选目录，避免相似方案淹没辨识度。
+        let mut list: Vec<SchemeInfo> = if searching {
+            self.all_schemes
+                .iter()
+                .filter(|s| {
+                    s.name.to_lowercase().contains(&q)
+                        || s.display_name.to_lowercase().contains(&q)
+                })
+                .cloned()
+                .collect()
+        } else {
+            self.schemes.clone()
+        };
+        // 当前方案若不在精选目录（例如从搜索里选的变体），补一张置顶，避免选中项凭空消失。
+        if !searching && !selected.is_empty() && !list.iter().any(|s| s.name == selected) {
+            if let Some(cur) = self.all_schemes.iter().find(|s| s.name == selected) {
+                list.insert(0, cur.clone());
+            }
+        }
+        // 排序：收藏置顶 → 最近使用 → 其余按目录顺序。
+        list.sort_by_key(|s| prefs.rank(&s.name));
         let grid = div()
             .flex().flex_wrap().gap_2().content_start()
             .h(px(420.)).id("scheme-grid").overflow_y_scroll()
@@ -1249,27 +1292,57 @@ impl ConfigUi {
             .bg(theme::bg_panel())
             .border_1().border_color(theme::border())
             .children(list.into_iter().map(|sc| {
-                let entity = cx.entity();
+                let entity_select = cx.entity();
+                let entity_star = cx.entity();
                 let name = sc.name.clone();
+                let name_star = name.clone();
                 let is_selected = selected == sc.name;
-                div().w(px(176.)).p_2().rounded_md().cursor_pointer()
+                let is_fav = prefs.is_favorite(&sc.name);
+                let fg = hex_rgb(&sc.foreground);
+                div().relative().w(px(196.)).p_2().rounded_md()
                     .bg(hex_rgb(&sc.background))
                     .when(is_selected, |d| d.border_2().border_color(theme::accent()))
                     .when(!is_selected, |d| d.border_1().border_color(theme::border()))
-                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
-                        let name = name.clone();
-                        entity.update(app, |state: &mut ConfigUi, cx| state.select_scheme(&name, cx));
-                    })
+                    // 只有内容区负责选中；星标是兄弟节点，点它不会冒泡到内容区。
                     .child(
-                        div().text_size(px(11.)).text_color(hex_rgb(&sc.foreground))
-                            .text_ellipsis().child(sc.name.clone()),
+                        div().cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                                let name = name.clone();
+                                entity_select.update(app, |state: &mut ConfigUi, cx| state.select_scheme(&name, cx));
+                            })
+                            .child(
+                                div().pr_5().text_size(px(12.)).font_weight(gpui::FontWeight::SEMIBOLD)
+                                    .text_color(fg).text_ellipsis().child(sc.display_name.clone()),
+                            )
+                            .child(
+                                div().mt_1().text_size(px(16.)).text_color(fg)
+                                    .child("Aa 文字"),
+                            )
+                            .when(!sc.note.is_empty(), |d| d.child(
+                                div().mt_1().text_size(px(10.)).text_color(fg).child(sc.note.clone()),
+                            ))
+                            .child(
+                                div().mt_1().text_size(px(9.)).text_color(fg)
+                                    .text_ellipsis().child(sc.name.clone()),
+                            )
+                            .child(
+                                div().flex().flex_wrap().gap(px(2.)).mt_1().children(
+                                    sc.ansi.iter().chain(sc.brights.iter()).map(|c| {
+                                        div().w(px(7.)).h(px(7.)).rounded_sm().bg(hex_rgb(c))
+                                    }),
+                                ),
+                            ),
                     )
                     .child(
-                        div().flex().flex_wrap().gap(px(2.)).mt_1().children(
-                            sc.ansi.iter().chain(sc.brights.iter()).map(|c| {
-                                div().w(px(7.)).h(px(7.)).rounded_sm().bg(hex_rgb(c))
-                            }),
-                        ),
+                        div().absolute().top(px(4.)).right(px(4.)).w(px(18.)).h(px(18.))
+                            .flex().items_center().justify_center().rounded_sm().cursor_pointer()
+                            .text_size(px(12.))
+                            .text_color(if is_fav { rgb(0xffc857) } else { theme::fg_dim() })
+                            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                                let name = name_star.clone();
+                                entity_star.update(app, |state: &mut ConfigUi, cx| state.toggle_scheme_favorite(&name, cx));
+                            })
+                            .child(if is_fav { "★" } else { "☆" }.to_string()),
                     )
             }));
         div().flex().flex_col().gap_3()
@@ -1282,6 +1355,10 @@ impl ConfigUi {
                 div().flex().items_center().gap_2()
                     .child(div().w(px(120.)).text_size(px(13.)).text_color(theme::fg_main()).child("搜索"))
                     .child(self.input(&self.scheme_search)),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("点 ★ 收藏；收藏置顶，其次按最近使用排序。搜索可查全部内置方案与旧配置名。"),
             )
             .child(grid)
             .child(
