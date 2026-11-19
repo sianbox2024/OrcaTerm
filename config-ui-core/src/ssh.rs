@@ -557,6 +557,40 @@ mod tests {
     }
 
     #[test]
+    fn connection_order_is_preserved_in_domains_and_launch_menu() {
+        // 回归：配置界面「已保存连接」支持 ↑/↓ 调整顺序后，保存必须同时
+        // 保持 ssh_domains 与 launch_menu 的条目顺序，终端启动菜单才会跟随。
+        let mk = |name: &str| SshConnection {
+            name: name.into(),
+            host: "h".into(),
+            port: 22,
+            username: String::new(),
+            key_path: String::new(),
+            initial_command: String::new(),
+            sftp_command: String::new(),
+        };
+        let conns = vec![mk("A"), mk("B"), mk("C")];
+
+        let menu = emit_launch_menu(&conns, None);
+        let pos = |name: &str| {
+            menu.find(&format!("label='SSH连接（{name}）'"))
+                .unwrap_or_else(|| panic!("菜单缺少 SSH 连接 {name}：{menu}"))
+        };
+        assert!(pos("A") < pos("B") && pos("B") < pos("C"), "{menu}");
+
+        // 经真实加载链路读回 ssh_domains，数组顺序不得变化
+        let lua = emit_ssh_domains(&conns);
+        let src = format!(
+            "local wezterm = require 'wezterm'\nlocal config = wezterm.config_builder()\n\n{return}{lua}return config\n",
+            return = "",
+        );
+        let loaded = crate::load::load_from_source(&src, std::path::Path::new("t.lua")).unwrap();
+        let snap = crate::load::config_to_json(&loaded.config);
+        let names: Vec<String> = parse_ssh_domains(&snap).into_iter().map(|c| c.name).collect();
+        assert_eq!(names, vec!["A", "B", "C"]);
+    }
+
+    #[test]
     fn launch_menu_pins_local_shells_to_default_domain() {
         // 回归：四项本地 shell 中未提权的两项必须显式钉死 domain='DefaultDomain'。
         // 缺省 domain 取 SpawnTabDomain::Default == CurrentPaneDomain，在 SSH 标签

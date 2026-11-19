@@ -599,8 +599,9 @@ impl super::TermWindow {
                 TabBarItem::ClearScreenButton => {
                     // e641 清理按钮：先把回滚+视口全部文本存档到 exe 同目录
                     // screen-shot/时间戳.txt（只保留最近 5 个），再清空回滚；
-                    // 先发 Ctrl+C (\x03) 终止前台输入/程序（如 heredoc 续输入、
-                    // 运行中的命令），稍候再发 Ctrl+L (\x0c) 清屏并重绘提示符
+                    // 随后依次发送两次 Ctrl+C (\x03) 和两次 clear 命令：
+                    // Ctrl+C 终止前台程序/退出 heredoc 等续输入状态，clear
+                    // 让 shell 真正清空屏幕并重绘提示符
                     if let Some(pane) = self.get_active_pane_or_overlay() {
                         let dims = pane.get_dimensions();
                         let cols = dims.cols;
@@ -620,14 +621,18 @@ impl super::TermWindow {
                         }
                         Self::archive_screen_text(&text);
                         pane.erase_scrollback(ScrollbackEraseMode::ScrollbackOnly);
-                        // Ctrl+C 与 Ctrl+L 必须分两次写入并留出间隙：行编辑器
-                        // （readline/ZLE）对 SIGINT 是延迟处理，两字节同批到达时
-                        // Ctrl+L 的"清屏并重绘"会赶在输入缓冲被丢弃之前执行，
-                        // 把已键入的文字原样画回（pty 实测 bash/zsh 均复现）
+                        // 行编辑器（readline/ZLE）对 SIGINT 是延迟处理的：
+                        // 字节同批到达时，clear 会在输入缓冲被丢弃之前执行，
+                        // 把已键入的文字原样画回（pty 实测 bash/zsh 均复现）。
+                        // 因此两次 Ctrl+C 与两次 clear 分四次写入，每步之间
+                        // 留出 150ms 间隔，让 shell 处理完上一步再继续。
                         pane.writer().write_all(b"\x03").ok();
+                        let steps: [&[u8]; 3] = [&b"\x03"[..], &b"clear\r"[..], &b"clear\r"[..]];
                         promise::spawn::spawn(async move {
-                            smol::Timer::after(Duration::from_millis(150)).await;
-                            pane.writer().write_all(b"\x0c").ok();
+                            for bytes in steps {
+                                smol::Timer::after(Duration::from_millis(150)).await;
+                                pane.writer().write_all(bytes).ok();
+                            }
                         })
                         .detach();
                         if let Some(window) = self.window.as_ref() {

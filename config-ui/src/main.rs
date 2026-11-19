@@ -1874,6 +1874,38 @@ impl ConfigUi {
         self.select_ssh(i, cx);
     }
 
+    /// 上移/下移连接（delta = -1 / +1）：与相邻项交换，选中项跟随移动。
+    /// 保存时 ssh_domains 与 launch_menu 都按此顺序重写，终端右键「+」
+    /// 启动菜单里的 SSH 连接顺序随之变化。
+    fn move_ssh(&mut self, i: usize, delta: isize, cx: &mut Context<Self>) {
+        let len = self.ssh_conns.len();
+        if i >= len {
+            return;
+        }
+        let to = match delta {
+            -1 => match i.checked_sub(1) {
+                Some(prev) => prev,
+                None => return,
+            },
+            1 => (i + 1).min(len - 1),
+            _ => return,
+        };
+        if to == i {
+            return;
+        }
+        let conn = self.ssh_conns.remove(i);
+        self.ssh_conns.insert(to, conn);
+        // 选中索引随条目一起移动；其余条目按删除/插入的方向整体偏移一格。
+        self.selected_ssh = match self.selected_ssh {
+            Some(sel) if sel == i => Some(to),
+            Some(sel) if i < sel && sel <= to => Some(sel - 1),
+            Some(sel) if to <= sel && sel < i => Some(sel + 1),
+            other => other,
+        };
+        self.dirty += 1;
+        cx.notify();
+    }
+
     /// 清空编辑器并取消选中，回到「填写新连接」草案态。
     fn new_ssh(&mut self, cx: &mut Context<Self>) {
         self.selected_ssh = None;
@@ -2145,30 +2177,45 @@ impl ConfigUi {
         let conns = self.ssh_conns.clone();
         let selected = self.selected_ssh;
 
+        let total = conns.len();
         let mut list = div().flex().flex_col().gap_1();
         for (i, c) in conns.iter().enumerate() {
             let is_sel = selected == Some(i);
             let entity = cx.entity();
+            let entity_select = entity.clone();
+            let entity_up = entity.clone();
+            let entity_down = entity;
             let addr = if c.port == 22 {
                 c.host.clone()
             } else {
                 format!("{}:{}", c.host, c.port)
             };
+            // 行背景与箭头在同一个 flex 行里；点击/选中只挂在左侧内容区，
+            // 避免箭头点击冒泡到整行时用旧索引重新选中错误条目。
             list = list.child(
-                div().flex().items_center().gap_2().px_2().py_1().rounded_sm().cursor_pointer()
+                div().flex().items_center().gap_1().px_2().py_1().rounded_sm()
                     .when(is_sel, |d| d.bg(theme::bg_elevated()))
                     .when(!is_sel, |d| d.bg(theme::bg_panel()))
-                    .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
-                        entity.update(app, |state: &mut ConfigUi, cx| state.select_ssh(i, cx));
-                    })
                     .child(
-                        div().w(px(110.)).text_size(px(12.)).font_family("JetBrains Mono")
-                            .text_color(theme::fg_main())
-                            .child(c.name.clone()),
+                        div().flex_1().min_w_0().flex().items_center().gap_2().cursor_pointer()
+                            .on_mouse_down(MouseButton::Left, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                                entity_select.update(app, |state: &mut ConfigUi, cx| state.select_ssh(i, cx));
+                            })
+                            .child(
+                                div().w(px(110.)).text_size(px(12.)).font_family("JetBrains Mono")
+                                    .text_color(theme::fg_main())
+                                    .child(c.name.clone()),
+                            )
+                            .child(
+                                div().min_w_0().text_size(px(12.)).text_color(theme::fg_dim()).child(addr),
+                            ),
                     )
-                    .child(
-                        div().text_size(px(12.)).text_color(theme::fg_dim()).child(addr),
-                    ),
+                    .child(arrow_btn("↑", i > 0, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                        entity_up.update(app, |state: &mut ConfigUi, cx| state.move_ssh(i, -1, cx));
+                    }))
+                    .child(arrow_btn("↓", i + 1 < total, move |_: &MouseDownEvent, _: &mut Window, app: &mut App| {
+                        entity_down.update(app, |state: &mut ConfigUi, cx| state.move_ssh(i, 1, cx));
+                    })),
             );
         }
         if conns.is_empty() {
@@ -2246,6 +2293,10 @@ impl ConfigUi {
             )
             .child(
                 div().text_size(px(11.)).text_color(theme::fg_dim())
+                    .child("排序：点每条连接右侧的 ↑ / ↓ 与相邻项交换；保存后终端右键「+」启动菜单里的 SSH 连接顺序同步更新。"),
+            )
+            .child(
+                div().text_size(px(11.)).text_color(theme::fg_dim())
                     .child("认证顺序：私钥文件 → ssh-agent → 默认密钥；私钥路径留空即用 agent/默认密钥。保存后即可从终端连接。"),
             )
             .child(
@@ -2261,7 +2312,7 @@ impl ConfigUi {
             .child(
                 div().flex().gap_3()
                     .child(
-                        div().w(px(280.)).flex().flex_col().gap_1().p_2().rounded_md().bg(theme::bg_base())
+                        div().w(px(320.)).flex().flex_col().gap_1().p_2().rounded_md().bg(theme::bg_base())
                             .child(div().text_size(px(12.)).text_color(theme::fg_main()).child("已保存连接"))
                             .child(list),
                     )
@@ -2547,6 +2598,22 @@ fn btn(text: &str, listener: impl Fn(&MouseDownEvent, &mut Window, &mut gpui::Ap
     div().px_2().py_1().rounded_sm().cursor_pointer()
         .bg(theme::bg_elevated())
         .text_size(px(12.)).text_color(theme::fg_main())
+        .child(text.to_string())
+        .on_mouse_down(MouseButton::Left, move |e, w, app| listener(e, w, app))
+}
+
+/// 列表行内的小箭头按钮（↑/↓ 排序用）。enabled=false 时只保留灰色箭头，
+/// 不显示按钮底色与手型光标；监听仍在，由 move_ssh 的边界检查兜底。
+fn arrow_btn(
+    text: &'static str,
+    enabled: bool,
+    listener: impl Fn(&MouseDownEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    div().w(px(20.)).h(px(20.)).flex().items_center().justify_center()
+        .rounded_sm()
+        .text_size(px(12.))
+        .text_color(if enabled { theme::fg_main() } else { theme::fg_dim() })
+        .when(enabled, |d| d.cursor_pointer().bg(theme::bg_elevated()))
         .child(text.to_string())
         .on_mouse_down(MouseButton::Left, move |e, w, app| listener(e, w, app))
 }
